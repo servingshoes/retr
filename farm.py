@@ -21,6 +21,8 @@ from queue import Queue, Empty # Exception
 from types import GeneratorType
 from collections.abc import Iterable
 
+from time import sleep
+
 lg=getLogger(__name__)
 
 # from pympler.tracker import SummaryTracker
@@ -41,6 +43,7 @@ class farm():
         self.tn_tmpl=tn_tmpl
         self.reuse=reuse
         self.handler=handler
+        self.objects=[] # Objects living within threads
         if type(reuse) is list:
             self.reuse_pool=reuse
         else:
@@ -60,7 +63,7 @@ class farm():
         with self.cond:
             orig_len=len(self.arr)
             #if type(arr) is GeneratorType: arr=tuple(arr)
-            if end or self.arr[-1] is not None:
+            if end or self.arr and self.arr[-1] is not None:
                 self.arr+=arr
             else: # When we're quitting
                 self.arr[:0]=arr # Insert in the beginning, so poison pills won't get lost
@@ -88,7 +91,8 @@ class farm():
     def do_extendable(self):
         '''When extendable is True, it means that we need to leave threads ready in case the array is extended. Otherwise we can quit right after do() has completed.'''
         o=self.init()
-
+        with self.cond: self.objects.append(o)
+            
         while True:
             self.cond.acquire()
             self.waiting+=1
@@ -117,6 +121,7 @@ class farm():
             if i is None: break # End of queue marker
             for j in farm.handle_item(o, i): self.q.put(j)
 
+        with self.cond: self.objects.remove(o)
         del o
 
         self.q.put(None) # Mark the thread has finished
@@ -132,6 +137,7 @@ class farm():
                 if len(self.reuse_pool): o=self.reuse_pool.pop()
                 
         if not o: o=self.init()
+        with self.cond: self.objects.append(o)
 
         #lg.warning(len(self.arr))
         while True:
@@ -143,22 +149,25 @@ class farm():
             for j in farm.handle_item(o, i): self.q.put(j)
 
         #lg.error(asizeof.asizeof(o))
-        if self.reusing():
-            with self.cond: self.reuse_pool.append(o)
-        else:
-            del o # This will release proxy back to the pool
-
+        with self.cond:
+            self.objects.remove(o)
+            if self.reusing():
+                self.reuse_pool.append(o)
+            else:
+                del o # This will release proxy back to the pool
+            
         self.q.put(None) # Mark the thread has finished
         lg.info("has finished")
 
         #tracker.print_diff()
                 
     def run(self):
+        '''Main function to invoke. When KeyboardInterrupt is received, it sets the quit_flag in all the objects present, retrievers then return (res_nok, abort). It's the problem of the do() function to handle it and possibly extend the main list with the item that was being handled to print it in the end (for possible restart)'''
         tlist=[]
         for i in range(self.num_threads):
             tn=self.tn_tmpl.format(i) if self.tn_tmpl else None
             t=Thread(target=self.do_extendable if self.extendable else self.do, name=tn)
-            tlist.append( t )
+            tlist.append(t)
             t.start()
 
         cnt=self.num_threads # That many threads are running
@@ -170,13 +179,13 @@ class farm():
                 continue # Go back to the get from normal q
             except KeyboardInterrupt:
                 lg.warning( 'Trying to kill nicely, putting {} None'.format(cnt) )
-                self.extend( [None]*cnt )
-                try:
-                    for i in tlist: i.join()
-                except KeyboardInterrupt:
-                    lg.warning( 'I obey.' )
-                    break
-                #_exit(0)
+                # Put poison pills and then signal the threads to stop
+                with self.cond:
+                    self.arr+=[None]*cnt
+                    self.cond.notify( cnt )
+                    for _ in self.objects: _.quit_flag=True
+
+                res=None
                 
             #lg.warning('run: {}'.format(res))
             if res != None:
