@@ -21,14 +21,13 @@ add.txt in terms of usability:)
 '''
 
 from logging import getLogger
-import requests
 import urllib.parse
 import ipaddress
 from os import _exit, access, R_OK
-from .retriever import *
-from .farm import *
 
-from pdb import set_trace
+from .retriever import retriever, res_ok, res_nok
+from .proxypool import proxypool, proxy
+from .farm import farm
 
 lg=getLogger(__name__)
 
@@ -77,31 +76,47 @@ This default method checks the status_code and the presence of anchor in the ret
         if r:
             for i in self.par.anchor:
                 if i in r.text:
-                    lg.info( self.p[0]+' good' )
+                    lg.info( self.p.p+' good' )
                     return res_ok, None
             else: # This is discarded.
-                #lg.info(self.p[0]+' wrong response: {}'.format(r.text))
+                #lg.info(self.p.p+' wrong response: {}'.format(r.text))
                 return res_nok, 'discard'
         else:
-            lg.info( self.p[0]+' download failed' )
+            lg.info( self.p.p+' download failed' )
 
         return res_nok, 'bad' # res_nok to quit request() right there
+
+    def save_result(self, p, r):
+        '''To help in debugging: saves the result of checking the proxy'''
+        if not access('files', R_OK): return
+
+        # there is r.text, store it
+        if type(r) is tuple:
+            if len(r) > 2:
+                r=r[2]
+            else:
+                return # (res_nok, 'oserror') for example. Cannot save
+        
+        with open('files/'+p+'.html','w') as f: f.write(r.text)
 
     def do(self, p):
         # The proxy is given, and we won't allow reinitialising from
         # master_plist (it's empty)
-        self.p=[p, False]
+        self.pp=proxypool([p])
+        self.p=None # Clear the proxy
 
         r=self.request('get', self.par.url,params=self.par.add_pars,
                        reinit=False)
+        self.save_result(p, r) # there is r.text, store it
         if type(r) is tuple:
+                
             if r[1] == 'discard': return # Don't return at all
             
             yield 'p_timeout' if r[1] == 'timeout' else 'p_bad', p
         else:
             yield 'p_good', p
         
-class filter():
+class filter:
     def __init__(self, url=None, anchor=[], add_pars={}, custom_handler=None,
                  max_retries=3, timeout=60,
                  headers={'User-Agent': "Mozilla/5.0 (X11; Linux x86_64; rv:38.0) Gecko/20100101 Firefox/38.0", 'Accept-Encoding': 'gzip, deflate, sdch'}):
@@ -121,31 +136,10 @@ class filter():
         self.timeout=timeout
         self.headers=headers
 
-    def run(self, basedir, num_threads=400):
-        '''basedir — directory where the proxy lists are kept
-If there is add.txt, it will process this file, adding to bad/good/timeout. If not, it will work with bad and timeout combined, possibly extracting new good proxies and rewriting all three files. Depending on time of the day different proxies may work, that's why it may be useful to run filter several times.'''
-
-        self.p_good=load_file(basedir+'good.txt');
-        self.p_bad=load_file(basedir+'bad.txt')
-        self.p_timeout=load_file(basedir+'timeout.txt')
-
-        self.p_work=self.p_bad|self.p_timeout
-
-        if access(basedir+'add.txt', R_OK):    
-            self.p_add=load_file(basedir+'add.txt')
-            self.p_work=self.p_add-(self.p_work|self.p_good)
-        else: # We're crunching bad and timeout sets, recreating them
-            self.p_bad=set()
-            self.p_timeout=set()
-
-        lg.warning('{} to handle'.format(len(self.p_work)))
-
-        if not len(self.p_work): exit()
-
-        good_len=len(self.p_good)
-
-        self.pp=proxypool(list(self.p_work))
-        self.pp.master_plist=[] # Disable replenishing
+    def _run(self, num_threads):
+        '''self.p_* are setup, run the requests'''
+        self.pp=None #proxypool([])
+        # self.pp.master_plist=[] # Disable replenishing
 
         length=0
         if len(self.p_work) > 5000:
@@ -164,6 +158,31 @@ If there is add.txt, it will process this file, adding to bad/good/timeout. If n
                 getattr(self,s).add(p) # add to the respective set
         except KeyboardInterrupt: # Handle interrupt gracefully
             pass # Will write what we've got so far. Other will remain in the add.txt
+    
+    def run(self, basedir, num_threads=400):
+        '''basedir — directory where the proxy lists are kept
+If there is add.txt, it will process this file, adding to bad/good/timeout. If not, it will work with bad and timeout combined, possibly extracting new good proxies and rewriting all three files. Depending on time of the day different proxies may work, that's why it may be useful to run filter several times.'''
+
+        self.p_good=load_file(basedir+'good.txt');
+        self.p_bad=load_file(basedir+'bad.txt')
+        self.p_timeout=load_file(basedir+'timeout.txt')
+
+        self.p_work=self.p_bad|self.p_timeout
+
+        if access(basedir+'add.txt', R_OK):
+            self.p_add=load_file(basedir+'add.txt')
+            self.p_work=self.p_add-(self.p_work|self.p_good)
+        else: # We're crunching bad and timeout sets, recreating them
+            self.p_bad=set()
+            self.p_timeout=set()
+
+        lg.warning('{} to handle'.format(len(self.p_work)))
+
+        if not len(self.p_work): exit()
+
+        good_len=len(self.p_good)
+
+        self._run(num_threads)
         
         save_file(basedir+'good.txt', self.p_good)
         save_file(basedir+'bad.txt', self.p_bad)
@@ -172,3 +191,13 @@ If there is add.txt, it will process this file, adding to bad/good/timeout. If n
         lg.warning('{} {}'.format(good_len,len(self.p_good)))
 
         _exit(0)
+
+    def get_good(self, p_work, num_threads=300):
+        self.p_work=p_work
+        self.p_bad=set()
+        self.p_good=set()
+        self.p_timeout=set()
+        
+        self._run(num_threads)
+
+        return self.p_good
