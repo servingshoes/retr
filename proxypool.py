@@ -10,6 +10,9 @@ from lxml import etree
 
 #from .filter import filter
 
+class NoProxiesException(Exception):
+    pass
+
 lg=getLogger(__name__)
 
 # status of the proxy
@@ -38,13 +41,14 @@ class proxypool():
         self.replenish_at=datetime.now()+timedelta(seconds=self.replenish_interval)
 
     def __init__(self, arg=None, max_retries=-1, replenish_interval=None,
-                 replenish_threads=400):
+                 replenish_threads=400, no_disable=False):
         '''Is initialised from arg. It can be iterable, string (treated as filename), or filter instance (to use for the proxies returned by gatherproxy)
 If number of errors through the proxy is more than max_retries (and max_retries is not -1), the proxy will be disabled. If arg is None, work without proxy.
 
 If there's only one proxy in the list, it's a special case. We don't disable this proxy.
 replenish_interval: how many seconds must pass between replenishes from gatherproxy.
 replenish_threads: how many threads to use when replenishing (now there's only gatherproxy, so it's a number of threads the farm will use
+no_disable set to True is good for the providers like crawlera or proxyrack, they have one address of the proxy to use, and rotate proxies behind the scene.
 '''
         self.lock=Lock()
         self.max_retries=max_retries
@@ -53,6 +57,7 @@ replenish_threads: how many threads to use when replenishing (now there's only g
         self.has_filter=False
         self.replenish_interval=replenish_interval
         self.replenish_threads=replenish_threads
+        self.no_disable=no_disable
         
         if arg is not None:
             if type(arg) is str: # File name
@@ -89,12 +94,16 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
         '''
         def disable(self, p):
             p.state=0 # Unitialised, but it will reside in disabled set
+
+            # TODO: maybe put it to rest?
+            if self.no_disable: return
+            
             if p in self.master_plist:
                 self.master_plist.remove(p)
-            self.disabled.add(p)
+                self.disabled.add(p) # If master_plist has changed, don't add old proxies
 
-        # Only one proxy, let it live how it is
-        if len(self.master_plist)+len(self.disabled) == 1: return
+        # One proxy (or even less - for the filter), let it live how it is
+        if len(self.master_plist)+len(self.disabled) <= 1: return
         
         with self.lock:
             if not st:
@@ -111,8 +120,9 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
                 p.tries=0 # Reset the tries counter
                 if p.state == st_proven: return # Already proven
                 # Moving it closer to the beginning
-                if p in self.master_plist: self.master_plist.remove(p)
-                self.master_plist.insert(0, p)
+                if p in self.master_plist:
+                    self.master_plist.remove(p)
+                self.master_plist.insert(0, p) # It works in any case, don't lose it
                 if p in self.disabled: self.disabled.remove(p)
 
                 p.state=st_proven
@@ -121,6 +131,8 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
             elif st == st_chillout:
                 p.wake_time=args[0]
                 p.state=st_chillout
+            #lg.debug('master_plist: {}'.format(self.master_plist))
+            #lg.debug('disabled: {}'.format(self.disabled))
                 
     def release_proxy(self, p):
         '''Returns the proxy back to the list. Good warm proxy, to be picked by
@@ -128,6 +140,7 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
         '''
         if not p: return # Proxy wasn't initialised
         with self.lock:
+            #print(lg)
             lg.debug('releasing {}'.format(p))
             if self.plist: self.plist.insert(0, p)
 
@@ -150,8 +163,9 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
                     while True:
                         try:
                             gp_lst=self.gatherproxy()
-                        except:
-                            lg.warning('Exception in gatherproxy')
+                        except Exception as e:
+                            #lg.warning('Exception in gatherproxy')
+                            lg.exception('Exception in gatherproxy')
                             continue
                         if gp_lst is None:
                             lg.warning('Error in gatherproxy')
@@ -176,15 +190,14 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
             
         p=None
         with self.lock:
-            lg.debug( 'self.plist: {}'.format(len(self.plist) or 'Empty'))
+            #lg.debug( 'self.plist: {}'.format(len(self.plist) or 'Empty'))
             #lg.error('get_proxy: pp={}, plist={}, master_plist={}'.format(self, self.plist, self.master_plist))      
             while True:
                 try:
                     p=self.plist.pop(0)
                 except (IndexError,AttributeError):
                     if not len(self.master_plist) and not self.has_filter:
-                        lg.warning( "No more proxies left" )
-                        break
+                        raise NoProxiesException
                     replenish(self) # Local function
                     continue
                 # TODO
@@ -240,7 +253,7 @@ Optionally we can remove disabled proxies from the saved file but setting exclud
         '''
         if not self.arg or type(self.arg) is not str: return
         
-        lg.info('Writing new proxies to: '+self.fn)
+        lg.info('Writing new proxies to: '+self.arg)
         with open(self.arg, 'w') as f, self.lock:
             # Put proven first
             out_list=sorted(self.master_plist, key=lambda i:i.state, reverse=True)

@@ -2,35 +2,39 @@
 
 '''
 The minimal usage would be:
-pp=proxypool(fn='proxies.txt')
+pp=proxypool('proxies.txt')
 rtv=retriever(pp)
 r=rtv.request('get', 'www.google.com')
 '''
 
 from time import sleep
+from contextlib import suppress
 from logging import getLogger
 from pdb import set_trace
 
-import requests
+from requests import exceptions, Session, Request
+from requests.adapters import HTTPAdapter
+from requests.utils import cookiejar_from_dict
 from requests.packages.urllib3.poolmanager import ProxyManager
+from requests.packages.urllib3.exceptions import LocationParseError
 
 from .proxypool import st_disabled, st_proven
 
+class ValidateException(Exception):
+# Used in the validate function. Argument:
+# ('retry', reason) # Retry with different proxy
+# ('continue', warning, sleep_in_seconds) # Retry with the same proxy. Temporary condition
+    pass
+
 lg=getLogger(__name__)
 
-# Result of the validate function
-res_ok=0
-res_nok=1
-res_retry=2 # Retry with different proxy
-res_continue=3 # Retry with the same proxy. Temporary condition
-
-class _adapter(requests.adapters.HTTPAdapter):
+class _adapter(HTTPAdapter):
     def __init__(self, p, headers={}, proxy_headers={}, timeout=30,
-                 max_retries=3, ca_certs=False):
-        super().__init__(max_retries=max_retries,
+                 max_retries=0, ca_certs=False):
+        super().__init__(max_retries=max_retries, # This one is the main value
                          pool_connections=10,
                          pool_maxsize=1, pool_block=True)
-        self.pm=ProxyManager(p, num_pools=10, timeout=timeout, retries=max_retries,
+        self.pm=ProxyManager(p, num_pools=10, timeout=timeout, # retries=2, #max_retries,
                              headers=headers, proxy_headers=proxy_headers,  
                              ca_certs=ca_certs)
 
@@ -43,9 +47,10 @@ class retriever:
     def setup_session(self):
         '''To be overridden in the descendant classes. This function is called after each change of the proxy, the intention is to prepare the session somehow. May login for example.'''
         pass
-        
+
+    # 'Accept-Encoding': 'gzip, deflate, sdch'
     def __init__(self, pp, headers={}, proxy_headers={},
-                 max_retries=1, timeout=60, ca_certs=None,
+                 max_retries=0, timeout=60, ca_certs=None,
                  discard_timeout=False):
         '''pp - proxypool to use
 headers - the headers to use in the underlying requests.Session
@@ -63,7 +68,6 @@ discard_timeout set to True will discard timed out proxies. Should have some sor
         self.ca_certs=ca_certs
         self.s=None
         self.quit_flag=False # Set to True from outside to make thread quit
-        self.setup_session()
 
     def __del__(self):        
         if self.p: # Leave this good proxy for someone to use
@@ -75,23 +79,22 @@ discard_timeout set to True will discard timed out proxies. Should have some sor
 bad or something, put it to the end of the list or mark as disabled.
 
         '''
-        # We could have use change_proxy in validate: self.p is None
+        # We could use change_proxy in validate: self.p is None
         if not self.p: return
 
         lg.debug("Changing proxy ({}): {}".format(self.p, err))
         self.pp.set_status(self.p, status)
         self.p=None # Will pick new proxy on next download
 
-    def pick_proxy(self):
+    def pick_proxy(self, regular=False):
         '''Pick proxy manually, may be needed for cases like visa, where we need to know
         our IP to put into the requests.
 
         '''
 
-        if self.p is not None: return # It's set, continue with it
+        if self.p is not None: return
         
         self.p=self.pp.get_proxy()
-        if self.p is None: raise LookupError
         lg.debug("proxy: {}".format(self.p))
         
         # As we're based on the requests.Session, which in turn has
@@ -101,37 +104,40 @@ bad or something, put it to the end of the list or mark as disabled.
             self.s.close()
             #set_trace()
             del self.s
-        self.s = requests.Session()
+        self.s = Session()
         a=_adapter('http://'+self.p.p, self.headers, self.proxy_headers,
                    self.timeout, self.max_retries, self.ca_certs)
         self.s.mount('http://', a)
         self.s.mount('https://', a)
+        if regular: self.setup_session()
 
     def clear_cookies(self):
         '''Clear the session cookies'''
         lg.warning( 'Clearing cookies' )
-        self.s.cookies=requests.utils.cookiejar_from_dict({})
+        if self.s:
+            self.s.cookies=cookiejar_from_dict({})
 
     def validate(self, url, r):
         '''Sometimes the proxy returns good error code, but the page is wrong, for
 example, requiring authorisation at the proxy, or telling we're over the limit.
 This function validates the page, for example, looking for anchors. Basic
-function checks only for status code. There may be several error codes returned
-with different actions to be taken: look for res_*.
+function checks only for status code. To signal some unusual condition, raise a ValidateException (see the doc)
 This function may be superseded in the descendant.
 
         '''
-        if r.status_code in [200, 301]: return res_ok, None
+        if r.status_code in [200, 301]: return
 
-        err='bad result'
-        lg.debug( '{}: {}'.format(err, r.status_code) )
+        raise ValidateException('retry',
+                                'bad result: {}'.format(r.status_code))
 
-        return res_retry, err
-
-    def request(self, what, url, reinit=True, **params):
+    def update_request(self, req, regular):
+        '''To be implemented in the descendant class. Call it to update the prepared request used within the request() cycle. For example setup_session may return some token to be used in subsequent calls'''
+        pass
+    
+    def request(self, what, url, regular=True, **params):
         '''Downloads individual URL, the signature is more or less the same as in Session.request(). It manages proxies within the proxypool depending on the request outcome.
 
-Setting reinit to False is used in setup_session (to evade calling setup_session() ad inf.)
+Setting regular to False is used in setup_session (to evade calling setup_session() ad inf., and for other things that differ)
 
         '''
         r = None # r will live on this level
@@ -142,16 +148,25 @@ Setting reinit to False is used in setup_session (to evade calling setup_session
             try: del r
             except: pass
 
+        headers=self.headers
+        with suppress(KeyError): headers.update(params.pop('headers'))
+
+        req = Request(what, url, headers=headers, **params)
+
         while True:
-            if self.quit_flag: return res_nok, 'abort'
+            #print(self.quit_flag)
+            if self.quit_flag:
+                raise KeyboardInterrupt
+            
             status=0 # Status to set should we change proxy
 
-            try:
-                self.pick_proxy()
-            except LookupError:
-                lg.warning('No more proxies left')
-                return res_nok, 'noproxies' # Hope it'll be handled by outer scope
-            
+            #lg.info('New run')
+            self.pick_proxy(regular) # This will eventually call setup_session()
+
+            self.update_request(req, regular)
+
+            prepped = self.s.prepare_request(req)
+
             #set_trace()
             err=""
             try:
@@ -161,33 +176,33 @@ Setting reinit to False is used in setup_session (to evade calling setup_session
                 # params['headers']['User-Agent']=self.ua.ff
                 # sleep(10)
 
-                r = self.s.request(what, url, timeout=self.timeout,
-                                   verify=self.ca_certs, proxies=proxies,
-                                   **params)
+                r = self.s.send(prepped, proxies=proxies,
+                                verify=self.ca_certs, timeout=self.timeout)
                 #lg.info( 'After request: {} {}'.format(what, url) )
-            except requests.exceptions.ChunkedEncodingError:
+                #print(r.text)
+            except exceptions.ChunkedEncodingError:
                 err="chunked" # Fail otherwise
-                retry+=1
-                if retry < self.max_retries:
-                    _safe_del(r)
-                    lg.debug( '{}: retrying'.format(err) )
-                    continue # Try this file again
-            except (requests.exceptions.ReadTimeout,
-                    requests.exceptions.ConnectTimeout):
+                # TODO: don't remember why it's here
+                # retry+=1
+                # if retry < self.max_retries:
+                #     _safe_del(r)
+                #     lg.debug( '{}: retrying'.format(err) )
+                #     continue # Try this file again
+            except (exceptions.ReadTimeout, exceptions.ConnectTimeout):
                 err="timeout"
                 if self.discard_timeout:
                     status=st_disabled
-            except requests.exceptions.SSLError:
+            except exceptions.SSLError:
                 err="sslerror"
-            except requests.exceptions.ContentDecodingError:
+            except exceptions.ContentDecodingError:
                 err="decoding"
-            except requests.exceptions.TooManyRedirects:
+            except exceptions.TooManyRedirects:
                 status=st_disabled
             except ConnectionResetError:
                 err="connreset"
-            except OSError: # Network unreachable for example
+            except OSError as e: # Network unreachable for example
                 err="oserror"
-            except requests.exceptions.ConnectionError as e:
+            except exceptions.ConnectionError as e:
                 err=e.__str__()
                 if 'Connection reset by peer' in err or\
                    'Read timed out' in err or\
@@ -203,34 +218,32 @@ Setting reinit to False is used in setup_session (to evade calling setup_session
                 else:
                     lg.warning('Unhandled exception in download')
                     raise
-            except requests.packages.urllib3.exceptions.LocationParseError: # What the hell is this?
+            except LocationParseError: # What the hell is this?
                 lg.warning('LocationParseError: {}'.format(url))
                 err='locationparse'
                 #return res_nok, 
             else:
                 #lg.info( 'In else: {} {}'.format(what, url) )
 
-                res,err=self.validate(url, r)
-                    
-                if res == res_ok:
+                # Now validate the result
+                try:
+                    self.validate(url, r)
                     self.pp.set_status( self.p, st_proven ) # Mark proxy as working
                     return r
-                elif res == res_continue: # err=(msg,time_to_sleep)
-                    lg.warning(err[0])
-                    sleep(err[1])
-                    continue
-                elif res == res_nok:
-                    return res, err, r
-                # Else continue (res_retry eg)
-                        
+                except ValidateException as e:
+                    tp, *args=e.args
+                    if tp == 'continue': # args=(msg,time_to_sleep)
+                        lg.warning(args[0])
+                        sleep(args[1])
+                        continue
+                    # elif res == res_nok:
+                    # return res, err, r
+                    elif tp == 'retry':
+                        pass # Fall to the bottom to change proxy and retry
+                    else:
+                        raise # Unknown exceptions are propagated
             #lg.info( 'After try: {} {} {} {}'.format(what, url, err, status) )
             
             _safe_del(r)
             
             self.change_proxy(err, status)
-            if reinit:
-                self.setup_session() # Reinit session
-            else:
-                # If we're in setup_session, probably we need to restart the
-                # function from the beginning
-                return res_nok, err

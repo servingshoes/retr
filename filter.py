@@ -15,18 +15,19 @@ Smallest possible use case would be:
     f.run(basedir)
 
 Create add.txt in the proxies_dir and run it. After the script completes, there
-will be three files: bad.txt, good.txt and timeout.txt. good.txt is better than
-add.txt in terms of usability:)
+will be two files: bad.txt and good.txt. good.txt is better than add.txt in
+terms of usability:)
 
 '''
 
 from logging import getLogger
+from contextlib import suppress
 import urllib.parse
 import ipaddress
 from os import _exit, access, R_OK
 
-from .retriever import retriever, res_ok, res_nok
-from .proxypool import proxypool, proxy
+from .retriever import retriever, ValidateException
+from .proxypool import proxypool, proxy, NoProxiesException
 from .farm import farm
 
 lg=getLogger(__name__)
@@ -43,14 +44,11 @@ def normalise_proxy(i):
 
 def load_file(fn):
     s=set()
-    try:
-        with open(fn) as f:
-            for i in f:
-                p=normalise_proxy(i.strip())
-                s.add(p)
+    with suppress(FileNotFoundError), open(fn) as f:
+        for i in f:
+            p=normalise_proxy(i.strip())
+            s.add(p)
         lg.warning('Loaded {} {}'.format(fn,len(s)))
-    except FileNotFoundError:
-        pass
     return s
 
 def save_file(fn, s):
@@ -60,86 +58,93 @@ def save_file(fn, s):
 
 class handler(retriever):
     def __init__(self, par):
-        super().__init__(par.pp, par.headers, timeout=par.timeout,
-                         max_retries=par.max_retries)
+        super().__init__(par.pp, **par.kwargs)
         self.par=par
 
     def validate(self, url, r):
-        '''Can be overridden in the custom class. Must return a tuple of result (res_ok if the proxy is good, res_nok otherwise) and reason. reason is one of: 'discard' — the proxy is discarded and won't get into the resulting sets, 'bad' — the proxy will get to the bad set.
+        '''Can be overridden in the custom class. Must either pass if the proxy is good, or raise a ValidateException with the following arguments:
+ ('discard', reason) — the proxy is discarded and won't get into the resulting sets,
+ ('bad', reason) — the proxy will get to the bad set.
 
 I use discard to mark totally wrong proxies, say if the proxy itself reports an error, or needs authorisation. And bad for the proxies I still hope can be brought back to senses, maybe it's temporarily blocked or something.
 
 This default method checks the status_code and the presence of anchor in the retrieved page.'''
         if r.status_code != 200:
-            return res_nok, 'status_code {}'.format(r.status_code)
+            raise ValidateException('bad', 'status_code {}'.format(r.status_code))
 
         if r:
             for i in self.par.anchor:
-                if i in r.text:
-                    lg.info( self.p.p+' good' )
-                    return res_ok, None
+                if i in r.text: return
             else: # This is discarded.
                 #lg.info(self.p.p+' wrong response: {}'.format(r.text))
-                return res_nok, 'discard'
-        else:
-            lg.info( self.p.p+' download failed' )
+                raise ValidateException('discard', 'noanchor', r)
 
-        return res_nok, 'bad' # res_nok to quit request() right there
+        raise ValidateException('bad', 'download failed')
 
     def save_result(self, p, r):
         '''To help in debugging: saves the result of checking the proxy'''
         if not access('files', R_OK): return
-
-        # there is r.text, store it
-        if type(r) is tuple:
-            if len(r) > 2:
-                r=r[2]
-            else:
-                return # (res_nok, 'oserror') for example. Cannot save
         
         with open('files/'+p+'.html','w') as f: f.write(r.text)
 
+    def _req(self, p, *args, **kwargs):
+        try:
+            r=self.request(*args, **kwargs)
+            self.save_result(p, r) # there is r.text, store it
+        except ValidateException as e:
+            tp, reason, *args = e.args
+
+            if reason == 'noanchor':
+                self.save_result(p, args[0]) # there is r in the third arg
+
+            return None, 'p_bad'
+        except NoProxiesException:
+            return None, 'p_bad'
+        except KeyboardInterrupt:
+            return None, None
+        
+        return r, None
+
     def do(self, p):
         # The proxy is given, and we won't allow reinitialising from
-        # master_plist (it's empty)
+        # master_plist (proxypool is empty)
         self.pp=proxypool([p])
-        self.p=None # Clear the proxy
+        self.pick_proxy() # Will create the session and all that
+        self.pp=proxypool([])
 
-        r=self.request('get', self.par.url,params=self.par.add_pars,
-                       reinit=False)
-        self.save_result(p, r) # there is r.text, store it
-        if type(r) is tuple:
-                
-            if r[1] == 'discard': return # Don't return at all
-            
-            yield 'p_timeout' if r[1] == 'timeout' else 'p_bad', p
-        else:
-            yield 'p_good', p
+        r,s=self._req(p, 'get', self.par.url, params=self.par.add_pars)
+        if r is None:
+            if s is not None: yield s, p
+            return                
+
+        yield 'p_good', p
         
 class filter:
     def __init__(self, url=None, anchor=[], add_pars={}, custom_handler=None,
-                 max_retries=3, timeout=60,
-                 headers={'User-Agent': "Mozilla/5.0 (X11; Linux x86_64; rv:38.0) Gecko/20100101 Firefox/38.0", 'Accept-Encoding': 'gzip, deflate, sdch'}):
+                 **kwargs):
         '''url — url to retrieve for checking
         anchor — the sequence of text strings to look for in the retrieved page. The page is valid if any of them is found in the downloaded page.
         add_pars — additional parameters to use for get() function
         custom_handler — class to base on handler, supersedes request functionality (don't forget to use reinit=False there). req() should return res,err.
-        max_retries — retry the page that many times before considering it bad
-        timeout — timeout to use in request_function
-        headers — additional headers to use in requests
+
+        Also all the named parameters of retriever are supported and passed
+        intact to it.
+
         '''
-        self.add_pars=add_pars
-        self.handler=custom_handler or handler
         self.url=url
         self.anchor=anchor
-        self.max_retries=max_retries
-        self.timeout=timeout
-        self.headers=headers
+        self.add_pars=add_pars
+        self.handler=custom_handler or handler
+
+        self.kwargs=kwargs
+        if 'headers' not in kwargs:
+            kwargs['headers']={
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:47.0) Gecko/20100101 Firefox/47.0',
+                'Accept-Encoding': 'gzip, deflate, sdch'}
 
     def _run(self, num_threads):
         '''self.p_* are setup, run the requests'''
-        self.pp=None #proxypool([])
-        # self.pp.master_plist=[] # Disable replenishing
+        self.pp=None
 
         length=0
         if len(self.p_work) > 5000:
@@ -151,30 +156,28 @@ class filter:
 
         # Argument is not needed, set to dummy
         f=farm(num_threads, lambda: self.handler(self), self.p_work)
-        try:
+        with suppress(KeyboardInterrupt): # Handle interrupt gracefully
             for s,p in f.run():
                 length+=1
                 if not length % step: lg.warning(length)
+                if s == 'p_good': print(p, 'good')
                 getattr(self,s).add(p) # add to the respective set
-        except KeyboardInterrupt: # Handle interrupt gracefully
-            pass # Will write what we've got so far. Other will remain in the add.txt
+        # Will write what we've got so far. Other will remain in the add.txt
     
     def run(self, basedir, num_threads=400):
         '''basedir — directory where the proxy lists are kept
-If there is add.txt, it will process this file, adding to bad/good/timeout. If not, it will work with bad and timeout combined, possibly extracting new good proxies and rewriting all three files. Depending on time of the day different proxies may work, that's why it may be useful to run filter several times.'''
+If there is add.txt, it will process this file, adding to bad/good. If not, it will work with bad, possibly extracting new good proxies and rewriting two resulting files. Depending on time of day different proxies may work, that's why it may be useful to run filter several times.'''
 
         self.p_good=load_file(basedir+'good.txt');
         self.p_bad=load_file(basedir+'bad.txt')
-        self.p_timeout=load_file(basedir+'timeout.txt')
 
-        self.p_work=self.p_bad|self.p_timeout
+        self.p_work=self.p_bad
 
         if access(basedir+'add.txt', R_OK):
             self.p_add=load_file(basedir+'add.txt')
             self.p_work=self.p_add-(self.p_work|self.p_good)
-        else: # We're crunching bad and timeout sets, recreating them
+        else: # We're crunching bad set, recreating it
             self.p_bad=set()
-            self.p_timeout=set()
 
         lg.warning('{} to handle'.format(len(self.p_work)))
 
@@ -186,7 +189,6 @@ If there is add.txt, it will process this file, adding to bad/good/timeout. If n
         
         save_file(basedir+'good.txt', self.p_good)
         save_file(basedir+'bad.txt', self.p_bad)
-        save_file(basedir+'timeout.txt', self.p_timeout)
 
         lg.warning('{} {}'.format(good_len,len(self.p_good)))
 
@@ -196,7 +198,6 @@ If there is add.txt, it will process this file, adding to bad/good/timeout. If n
         self.p_work=p_work
         self.p_bad=set()
         self.p_good=set()
-        self.p_timeout=set()
         
         self._run(num_threads)
 
