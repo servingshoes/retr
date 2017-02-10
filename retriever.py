@@ -197,11 +197,12 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
             except exceptions.ContentDecodingError:
                 err="decoding"
             except exceptions.TooManyRedirects:
+                err="redirects"
                 status=st_disabled
             except ConnectionResetError:
                 err="connreset"
             except OSError as e: # Network unreachable for example
-                err="oserror"
+                err='oserror: '+e.__str__()
             except exceptions.ConnectionError as e:
                 err=e.__str__()
                 if 'Connection reset by peer' in err or\
@@ -232,6 +233,7 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                     return r
                 except ValidateException as e:
                     tp, *args=e.args
+                    err=args[0]
                     if tp == 'continue': # args=(msg,time_to_sleep)
                         lg.warning(args[0])
                         sleep(args[1])
