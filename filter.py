@@ -58,7 +58,7 @@ def save_file(fn, s):
 
 class handler(retriever):
     def __init__(self, par):
-        super().__init__(par.pp, **par.kwargs)
+        retriever.__init__(self, par.pp, **par.kwargs)
         self.par=par
 
     def validate(self, url, r):
