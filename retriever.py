@@ -149,8 +149,11 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
             except: pass
 
         headers=self.headers
-        with suppress(KeyError): headers.update(params.pop('headers'))
-
+        allow_redirects=True # Default
+        with suppress(KeyError):
+            headers.update(params.pop('headers'))
+        with suppress(KeyError):
+            allow_redirects=params.pop('allow_redirects')
         req = Request(what, url, headers=headers, **params)
 
         while True:
@@ -177,7 +180,8 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 # sleep(10)
 
                 r = self.s.send(prepped, proxies=proxies,
-                                verify=self.ca_certs, timeout=self.timeout)
+                                verify=self.ca_certs, timeout=self.timeout,
+                                allow_redirects=allow_redirects)
                 #lg.info( 'After request: {} {}'.format(what, url) )
                 #print(r.text)
             except exceptions.ChunkedEncodingError:
