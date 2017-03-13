@@ -22,9 +22,10 @@ terms of usability:)
 
 from logging import getLogger
 from contextlib import suppress
-import urllib.parse
-import ipaddress
+from ipaddress import IPv4Address, AddressValueError
 from os import _exit, access, R_OK
+
+from pdb import set_trace
 
 from .retriever import retriever, ValidateException
 from .proxypool import proxypool, proxy, NoProxiesException
@@ -36,8 +37,8 @@ def normalise_proxy(i):
     'Removes leading zeros'
     p_raw=i.split(':')
     try:
-        a=ipaddress.IPv4Address(p_raw[0])
-    except ipaddress.AddressValueError:
+        a=IPv4Address(p_raw[0])
+    except AddressValueError:
         lg.critical('Problem with {}'.format(i))
         exit()
     return ':'.join((a.exploded,p_raw[1]))
@@ -108,6 +109,7 @@ This default method checks the status_code and the presence of anchor in the ret
     def do(self, p):
         # The proxy is given, and we won't allow reinitialising from
         # master_plist (proxypool is empty)
+        set_trace()
         self.pp=proxypool([p])
         self.pick_proxy() # Will create the session and all that
         self.pp=proxypool([])
@@ -154,7 +156,6 @@ class filter:
         else:
             step=10
 
-        # Argument is not needed, set to dummy
         f=farm(num_threads, lambda: self.handler(self), self.p_work)
         with suppress(KeyboardInterrupt): # Handle interrupt gracefully
             for s,p in f.run():

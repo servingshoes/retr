@@ -184,6 +184,9 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                                 allow_redirects=allow_redirects)
                 #lg.info( 'After request: {} {}'.format(what, url) )
                 #print(r.text)
+                self.validate(url, r)
+                self.pp.set_status( self.p, st_proven ) # Mark proxy as working
+                return r
             except exceptions.ChunkedEncodingError:
                 err="chunked" # Fail otherwise
                 # TODO: don't remember why it's here
@@ -227,27 +230,26 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 lg.warning('LocationParseError: {}'.format(url))
                 err='locationparse'
                 #return res_nok, 
-            else:
-                #lg.info( 'In else: {} {}'.format(what, url) )
-
-                # Now validate the result
-                try:
-                    self.validate(url, r)
-                    self.pp.set_status( self.p, st_proven ) # Mark proxy as working
-                    return r
-                except ValidateException as e:
-                    tp, *args=e.args
-                    err=args[0]
-                    if tp == 'continue': # args=(msg,time_to_sleep)
-                        lg.warning(args[0])
-                        sleep(args[1])
-                        continue
-                    # elif res == res_nok:
-                    # return res, err, r
-                    elif tp == 'retry':
+            except ValidateException as e:
+                tp, *args=e.args
+                err=args[0]
+                if tp == 'continue': # args=(msg,time_to_sleep)
+                    lg.warning(args[0])
+                    sleep(args[1])
+                    continue
+                # elif res == res_nok:
+                # return res, err, r
+                elif tp == 'retry':
+                    if regular:
                         pass # Fall to the bottom to change proxy and retry
                     else:
-                        raise # Unknown exceptions are propagated
+                        raise # Propagate to the toplevel, let'em handle it
+                else:
+                    raise # Unknown exceptions are propagated
+            else:
+                lg.info( 'In else: {} {}'.format(what, url) )
+                _exit(1)
+                
             #lg.info( 'After try: {} {} {} {}'.format(what, url, err, status) )
             
             _safe_del(r)
