@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
-from setuptools import setup, find_packages
-import sys
+from setuptools import setup
 
 CLASSIFIERS = [
     'Development Status :: 4 - Beta',
@@ -22,14 +21,14 @@ setup(
     name='retr',
     version='1.0',
     description='Parallelised proxy-switching engine for scraping. Based on requests or aiohttp (alpha)',
-    long_description=convert('README.md', 'rst'),
+    long_description=open('README.md').read(),
     url='https://github.com/aikipooh/retr',
     # license='BSD License',
     # platforms=['OS Independent'],
     classifiers=CLASSIFIERS,
-    packages=find_packages(exclude=['example', 'docs', 'testshop']),
-    include_package_data=True,
-    zip_safe=False,
+    packages=['retr'],
+    #include_package_data=True,
+    #zip_safe=False,
     install_requires=[
         'requests>=2.0', # For the legacy (threaded) version
     ]
