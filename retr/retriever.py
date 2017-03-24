@@ -18,7 +18,7 @@ from requests.utils import cookiejar_from_dict
 from requests.packages.urllib3.poolmanager import ProxyManager
 from requests.packages.urllib3.exceptions import LocationParseError
 
-from .proxypool import st_disabled, st_proven
+from .proxypool_common import st_disabled, st_proven
 
 class ValidateException(Exception):
 # Used in the validate function. Argument:
