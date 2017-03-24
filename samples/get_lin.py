@@ -221,7 +221,7 @@ class linkedin(retriever):
                 all_profiles=tree.xpath('//div[@class="profile-card"]//h3/a/@href')
                 lg.warning('TOTAL: str: {}, total_num: {}, len: {}'.format(
                     total_str[0], total_num, len(all_profiles)))
-                 if get_lists:                
+                if get_lists:                
                     if len(all_profiles) != total_num: # Emit pub/dir
                         yield q
                     else:
