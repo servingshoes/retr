@@ -1,4 +1,10 @@
 from logging import getLogger, ERROR
+#from ipaddress import IPv4Address, AddressValueError
+from contextlib import suppress
+from csv import reader, writer
+from collections import OrderedDict
+from urllib.parse import urlparse
+from base64 import b64encode
 
 class NoProxiesException(Exception):
     pass
@@ -15,23 +21,70 @@ lg=getLogger(__name__)
 class proxy:
     '''Proxy with state'''
 
-    def __init__(self, p):
-        self.p=p
+    def __init__(self, p, flags=''):
+        p=p.strip()
+        
+        if not p.startswith('http://'): p='http://'+p # Hack for now
+        o=urlparse(p)
+
+        if not o.port:
+            raise ValueError('Problem with {}'.format(p))
+
         self.state=0 # Set status to neutral
         self.tries=0 # Number of timeout retries
         self.wake_time=None
+        self.flags=flags
 
+        # TODO: Remove possible leading zeros from hostname (use IPv4Address)
+
+        # If there's user/pass, make the header here
+        if o.username:
+            self.creds='Basic ' + b64encode((o.username+':'+o.password).encode()).decode()
+            # Will turn port 03128 to 3128 among other things
+            self.p='{0.scheme}://{0.username}:{0.password}@{0.hostname}:{0.port}'.format(o)
+        else:
+            self.creds=None
+            self.p='{0.scheme}://{0.hostname}:{0.port}'.format(o)        
+
+    def addflag(self, flag):
+        self.flags+=flag
+        
     def __repr__(self):
         return '{0.p} ({1} {0.tries})'.format(self, status_names[self.state])
 
+def load(arg, all=False):
+    '''all is False: load only the good ones
+       mode: 'O' — the proxy will be used once, and then we'll have a result or an Exception (used for filtering). None — usual proxy
+'''
+
+    od=OrderedDict()
+    if isinstance(arg, str): # File name    
+        lg.info('Loading {}'.format(arg))
+        with suppress(FileNotFoundError), open(arg) as f:
+            rd=reader(f, delimiter='\t')
+            for row in rd: # (proxy, status)
+                status=row[1] if len(row) > 1 else ''
+                if status != 'G' and not all: continue # Skip bad ones
+                p=proxy(row[0], status)
+                od[p.p]=p                
+        lg.warning('Loaded {} {}'.format(arg,len(od)))
+    else: # Iterable of proxies
+        for i in arg:
+            p=proxy(i, 'G') # Mark as good
+            od[p.p]=p
+        lg.warning('Loaded {} proxies from iterable'.format(len(od)))
+    
+    return od
+
 class proxypool:
-    '''This class contains a list of proxies, with functions to manipulate this list. With time the list is sorted by usefulness of the proxy: bad proxies go to the end, good proxies stay in the beginning. The access is NOT thread-safe, suits for aiohttp and for legacy version with external lock.'''
+    '''This class contains a list of proxies, with functions to manipulate this list. With time the list is sorted by usefulness of the proxy: bad proxies go to the end, good proxies stay in the beginning. The access is NOT thread-safe, suitable for aiohttp but the legacy version should use external lock.'''
 
     def update_replenish(self):
         self.replenish_at=datetime.now()+timedelta(seconds=self.replenish_interval)
 
-    def __init__(self, arg=None, max_retries=-1, replenish_interval=None,
-                 replenish_threads=400, no_disable=False):
+    def __init__(self, arg=None, do_filter=False, max_retries=-1,
+                 replenish_interval=None, replenish_threads=400,
+                 no_disable=False):
         '''Is initialised from arg. It can be iterable, string (treated as filename), or filter instance (to use for the proxies returned by gatherproxy)
 If number of errors through the proxy is more than max_retries (and max_retries is not -1), the proxy will be disabled. If arg is None, work without proxy.
 
@@ -49,22 +102,18 @@ no_disable set to True is good for the providers like crawlera or proxyrack, the
         self.no_disable=no_disable
         
         if arg is not None:
-            if type(arg) is str: # File name
-                lg.info( 'Loading '+arg )
-                with open(arg) as f: arr=f.read().splitlines()
-            elif type(arg).__name__ == 'filter': # Ugly! But cannot import filter because of circular dependency
+            if type(arg).__name__ == 'filter': # Ugly! But cannot import filter because of circular dependency
                 self.has_filter=True
                 self.replenish_at=datetime.now()
                 self.retry_no=self.max_retries # To make it replenish right away
-                arr=[]                
-            else: # It's an iterable
-                arr=arg
+                self.master_plist=OrderedDict()
+            else: # It's an iterable or a file name
+                self.master_plist=load(arg, do_filter) # do_filter is True, all is True
                 
-        self.master_plist=list(map(proxy, arr))
         self.disabled=set()
         self.plist=[] # Will be initialised on first get_proxy
 
-        if len(arr) > 1:
+        if len(self.master_plist) > 1:
             lg.info( "{} proxies loaded".format(len(self.master_plist)))
 
     def active_number(self):
@@ -87,8 +136,8 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
             # TODO: maybe put it to rest?
             if self.no_disable: return
             
-            if p in self.master_plist:
-                self.master_plist.remove(p)
+            if p.p in self.master_plist:
+                del self.master_plist[p.p]
                 self.disabled.add(p) # If master_plist has changed, don't add old proxies
 
         # One proxy (or even less - for the filter), let it live how it is
@@ -97,20 +146,17 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
         if not st:
             lg.debug('downvoting {}'.format(p))
             # We could have had replenish in between, so it's not there
-            if p in self.master_plist:
-                self.master_plist.remove(p)
-                self.master_plist.append(p) # Put it to the end
+            with suppress(KeyError): self.master_plist.move_to_end(p.p)
             p.state=0 # Remove proven state
             p.tries+=1
             if self.max_retries != -1 and p.tries >= self.max_retries:
                 disable(self, p)
         elif st == st_proven:
             p.tries=0 # Reset the tries counter
-            if p.state == st_proven: return # Already proven
-            # Moving it closer to the beginning
-            if p in self.master_plist:
-                self.master_plist.remove(p)
-            self.master_plist.insert(0, p) # It works in any case, don't lose it
+            if p.state == st_proven: return # Already proven, no fuss
+            
+            self.master_plist[p.p]=p # It works in any case, don't lose it
+            self.master_plist.move_to_end(p.p, False) # Move to the beginning
             if p in self.disabled: self.disabled.remove(p)
 
             p.state=st_proven
@@ -131,7 +177,9 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
             lg.debug('releasing {}'.format(p))
         except:
             pass # Strange error, happens on shutdown. Maybe lg is done with already?
-        if self.plist: self.plist.insert(0, p)
+        if self.plist:
+            self.plist[p.p]=p
+            self.plist.move_to_end(p.p, False) # Move to the beginning
 
     def get_proxy(self) -> 'proxy':
         '''Gets proxy from the beginning of the list. In fact we have two lists, one is master_list, all proxies that were read on initialisation, and working list, where we pluck the proxies from. When working list becomes empty, we replenish it again from the master_list.'''
@@ -182,7 +230,7 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
         #lg.error('get_proxy: pp={}, plist={}, master_plist={}'.format(self, self.plist, self.master_plist))      
         while True:
             try:
-                p=self.plist.pop(0)
+                dummy,p=self.plist.popitem(False) # Get from the beginning
             except (IndexError,AttributeError):
                 if not len(self.master_plist) and not self.has_filter:
                     raise NoProxiesException
@@ -243,10 +291,15 @@ Optionally we can remove disabled proxies from the saved file by setting exclude
         
         lg.info('Writing new proxies to: '+self.arg)
         with open(self.arg, 'w') as f:
-            # Put proven first
-            out_list=sorted(self.master_plist, key=lambda i:i.state,
-                            reverse=True)
-            if not exclude_disabled:
-                out_list.extend(self.disabled)
+            # # Put proven first
+            # out_list=sorted(self.master_plist, key=lambda i:i.state,
+            #                 reverse=True)
+            # if not exclude_disabled:
+            #     out_list.extend(self.disabled)
 
-            for i in out_list: f.write("{}\n".format(i.p))
+            # for i in out_list: f.write("{}\n".format(i.p))
+
+            for k, v in pp.master_plist.items():
+                # Remove temporary flag (if it was there) and write
+                f.write('{}\t{}\n'.format(v.p, v.flags.replace('O','')))
+
