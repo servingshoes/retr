@@ -11,6 +11,7 @@ from time import sleep
 from contextlib import suppress
 from logging import getLogger
 from pdb import set_trace
+from ssl import SSLError
 
 from requests import exceptions, Session, Request
 from requests.adapters import HTTPAdapter
@@ -18,12 +19,14 @@ from requests.utils import cookiejar_from_dict
 from requests.packages.urllib3.poolmanager import ProxyManager
 from requests.packages.urllib3.exceptions import LocationParseError
 
-from .proxypool_common import st_disabled, st_proven
-
 class ValidateException(Exception):
 # Used in the validate function. Argument:
 # ('retry', reason) # Retry with different proxy
 # ('continue', warning, sleep_in_seconds) # Retry with the same proxy. Temporary condition
+    pass
+
+class ProxyException(Exception):
+# Used in the filter proxy engine. Argument: proxy
     pass
 
 lg=getLogger(__name__)
@@ -102,7 +105,6 @@ bad or something, put it to the end of the list or mark as disabled.
         # session and make a totally new one to be safe.
         if self.s:
             self.s.close()
-            #set_trace()
             del self.s
         self.s = Session()
         a=_adapter(self.p.p, self.headers, self.proxy_headers, self.timeout,
@@ -143,11 +145,6 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
         r = None # r will live on this level
         retry=0 # For chunked retries
 
-        def _safe_del(r):
-            '''Sometimes r is not bound on return from the function.'''
-            try: del r
-            except: pass
-
         headers=self.headers
         allow_redirects=True # Default
         with suppress(KeyError):
@@ -161,7 +158,7 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
             if self.quit_flag:
                 raise KeyboardInterrupt
             
-            status=0 # Status to set should we change proxy
+            status=None # Status to set should we change proxy
 
             #lg.info('New run')
             self.pick_proxy(regular) # This will eventually call setup_session()
@@ -170,11 +167,10 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
 
             prepped = self.s.prepare_request(req)
 
-            #set_trace()
             err=""
             try:
                 proxies={ 'https': self.p.p, 'http': self.p.p } if self.p else {}
-                #lg.info( 'Before request: {} {}'.format(what, url) )
+                #lg.debug( 'Before request: {} {}'.format(what, url) )
 
                 # params['headers']['User-Agent']=self.ua.ff
                 # sleep(10)
@@ -182,10 +178,10 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 r = self.s.send(prepped, proxies=proxies,
                                 verify=self.ca_certs, timeout=self.timeout,
                                 allow_redirects=allow_redirects)
-                #lg.info( 'After request: {} {}'.format(what, url) )
+                #lg.debug( 'After request: {} {}'.format(what, url) )
                 #print(r.text)
                 self.validate(url, r)
-                self.pp.set_status( self.p, st_proven ) # Mark proxy as working
+                self.pp.set_status( self.p, 'P' ) # Mark proxy as working
                 return r
             except exceptions.ChunkedEncodingError:
                 err="chunked" # Fail otherwise
@@ -197,39 +193,40 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 #     continue # Try this file again
             except (exceptions.ReadTimeout, exceptions.ConnectTimeout):
                 err="timeout"
-                if self.discard_timeout:
-                    status=st_disabled
-            except exceptions.SSLError:
-                err="sslerror"
-            except exceptions.ContentDecodingError:
-                err="decoding"
+                if self.discard_timeout: status='D'
             except exceptions.TooManyRedirects:
                 err="redirects"
-                status=st_disabled
-            except ConnectionResetError:
-                err="connreset"
-            except OSError as e: # Network unreachable for example
-                err='oserror: '+e.__str__()
+                status='D'
             except exceptions.ConnectionError as e:
                 err=e.__str__()
-                if 'Connection reset by peer' in err or\
-                   'Read timed out' in err or\
-                   'EOF occurred in violation of protocol' in err or\
-                   'Too many open connections' in err or\
-                   'Temporary failure in name' in err:
-                    pass
-                elif 'Caused by ProxyError' in err or\
-                     'No connections allowed from your IP' in err or\
-                     'Connection timed out' in err or\
-                     'Connection aborted' in err:
-                    status=st_disabled
+                #print(type(e), len(e.args[0].args), err)
+                if type(e) in (
+                        exceptions.ProxyError,
+                ):
+                    status='D' # Bad proxy
+                elif type(e) in (
+                        exceptions.SSLError, exceptions.ConnectionError
+                ):
+                    pass # Just an error
                 else:
                     lg.warning('Unhandled exception in download')
                     raise
-            except LocationParseError: # What the hell is this?
-                lg.warning('LocationParseError: {}'.format(url))
-                err='locationparse'
-                #return res_nok, 
+
+                # if 'Connection reset by peer' in err or\
+                #    'Read timed out' in err or\
+                #    'EOF occurred in violation of protocol' in err or\
+                #    'Too many open connections' in err or\
+                #    '[SSL: UNKNOWN_PROTOCOL]' in err or \
+                #    'Temporary failure in name' in err:
+                #     pass
+                # elif 'Caused by ProxyError' in err or\
+                #      'No connections allowed from your IP' in err or\
+                #      'Connection timed out' in err or\
+                #      'Connection aborted' in err:
+                #     status='D'
+                # else:
+                #     lg.warning('Unhandled exception in download')
+                #     raise
             except ValidateException as e:
                 tp, *args=e.args
                 err=args[0]
@@ -246,12 +243,38 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                         raise # Propagate to the toplevel, let'em handle it
                 else:
                     raise # Unknown exceptions are propagated
-            else:
-                lg.info( 'In else: {} {}'.format(what, url) )
-                _exit(1)
-                
+            except Exception as e:
+                print(type(e))
+                if type(e) in (
+                        OSError, # Network unreachable for example
+                        LocationParseError, # What the hell is this?
+                        ConnectionResetError, exceptions.SSLError, SSLError,
+                        exceptions.ContentDecodingError
+                ):
+                    lg.warning('Exception: {} — {}'.format(
+                        type(e), e.__str__()))
+                else:
+                    raise # Unknown (yet) exception
+                err=type(e)
+
+            # Sometimes r is not bound on return from the function.
+            with suppress(UnboundLocalError): del r
+            
             #lg.info( 'After try: {} {} {} {}'.format(what, url, err, status) )
-            
-            _safe_del(r)
-            
+
+            # If we're one time (filtering), quit here. sel.p can be
+            # None if we're cancelled
+            if self.p and 'O' in self.p.flags:
+                # This goes to the outer function. Depending on our needs we
+                # can either remove the proxy from the master_list (so it'll be
+                # gone forever), or mark it as bad ('B'). I discard totally
+                # wrong proxies, say if the proxy itself reports an error, or
+                # needs authorisation. And bad is for the proxies I still hope
+                # can be brought back to senses, maybe it's temporarily blocked
+                # or something.
+                
+                #lg.exception('Error: {}'.format(err))
+                #set_trace()
+                raise ProxyException(self.p.p)
+
             self.change_proxy(err, status)

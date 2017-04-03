@@ -16,7 +16,6 @@ from asyncio import TimeoutError as aio_TimeoutError, sleep as aio_sleep
 from ssl import CertificateError
 from pdb import set_trace
 
-from .proxypool_common import st_disabled, st_proven
 from .utils import CustomAdapter
 
 class ValidateException(Exception):
@@ -131,13 +130,12 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
 
         '''
 
-        r = None # r will live on this level
-
         headers=self.headers
         with suppress(KeyError): headers.update(params.pop('headers'))
 
         while True:
             status=0 # Status to set should we change proxy
+            r = None
 
             err=''
             try:
@@ -154,48 +152,18 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                                              **params)
                 #lg.info( 'After request1: {} {}'.format(what, url) )
                 await self.validate(r) # May require getting data
-                self.pp.set_status( self.p, st_proven ) # Mark proxy as working
+                self.pp.set_status( self.p, 'proven' ) # Mark proxy as working
                 #lg.info( 'After request2: {} {}'.format(what, url) )
                 return r
             except errors.ProxyConnectionError as e:
                 err='ProxyConnectionError: '+e.__str__()
-                status=st_disabled
+                status='disabled'
             except errors.HttpProxyError as e:
                 err='HttpProxyError: '+e.__str__()
+                # TODO: Mark proxy as disabled?
             except (aio_TimeoutError, TimeoutError):
                 err='timeout'
-                if self.discard_timeout:
-                    status=st_disabled
-            except errors.ClientOSError as e:
-                err='ClientOSEError: '+e.__str__()
-            except errors.ClientResponseError as e:
-                err='ClientResponseError: '+e.__str__()
-            # except exceptions.TooManyRedirects:
-            #     err="redirects"
-            #     status=st_disabled
-            except errors.ServerDisconnectedError:
-                err='ServerDisconnectedError'
-            except CertificateError:
-                err='CertificateError'
-            # except ConnectionResetError:
-            #     err='ConnectionResetError'
-
-            # except exceptions.ConnectionError as e:
-            #     err=e.__str__()
-            #     if 'Connection reset by peer' in err or\
-            #        'Read timed out' in err or\
-            #        'EOF occurred in violation of protocol' in err or\
-            #        'Too many open connections' in err or\
-            #        'Temporary failure in name' in err:
-            #         pass
-            #     elif 'Caused by ProxyError' in err or\
-            #          'No connections allowed from your IP' in err or\
-            #          'Connection timed out' in err or\
-            #          'Connection aborted' in err:
-            #         status=st_disabled
-            #     else:
-            #         lg.warning('Unhandled exception in download')
-            #         raise
+                if self.discard_timeout: status='disabled'
             except ValidateException as e:
                 tp, *args=e.args
                 err=args[0]
@@ -211,12 +179,17 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                     raise # Unknown exceptions are propagated
             except Exception as e:
                 if type(e) in (
-                        errors.BadStatusLine,
-                         ):
-                    lg.exception('Exception: {} — {}'.format(
+                        errors.BadStatusLine, CertificateError,
+                        errors.ServerDisconnectedError, errors.ClientOSError,
+                        errors.ClientResponseError
+                ):
+                    lg.warning('Exception: {} — {}'.format(
                         type(e), e.__str__()))
-            finally:
-                if r: r.close()
+                else:
+                    raise # Unknown (yet) exception
+                err=type(e)
+
+            if r: r.close()
             #lg.info( 'After try: {} {} {} {}'.format(what, url, err, status) )
 
             # If we're one time (filtering), quit here
@@ -228,6 +201,9 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 # needs authorisation. And bad is for the proxies I still hope
                 # can be brought back to senses, maybe it's temporarily blocked
                 # or something.
+                
+                #lg.exception('Error: {}'.format(err))
+                #set_trace()
                 raise ProxyException(self.p.p)
 
             self.change_proxy(err, status)
