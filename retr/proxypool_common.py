@@ -34,7 +34,8 @@ class proxy:
         self.creds=None
 
         if p:
-            if not p.startswith('http://'): p='http://'+p # Hack for now
+            if not (p.startswith('http://') or p.startswith('https://')):
+                p='http://'+p # Don't know how to make it best
             o=urlparse(p)
 
             if not o.port:
