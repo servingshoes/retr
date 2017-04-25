@@ -107,10 +107,13 @@ bad or something, put it to the end of the list or mark as disabled.
             self.s.close()
             del self.s
         self.s = Session()
-        a=_adapter(self.p.p, self.headers, self.proxy_headers, self.timeout,
-                   self.max_retries, self.ca_certs)
-        self.s.mount('http://', a)
-        self.s.mount('https://', a)
+        # I cannot make it work unless set the headers here. No idea why.
+        if self.p.p: # Only if we have some proxy
+            self.proxy_headers={'Proxy-Authorization': self.p.creds or None}
+            a=_adapter(self.p.p, self.headers, self.proxy_headers, self.timeout,
+                       self.max_retries, self.ca_certs)
+            self.s.mount('http://', a)
+            self.s.mount('https://', a)
         if regular: self.setup_session()
 
     def clear_cookies(self):
