@@ -2,7 +2,7 @@ from logging import getLogger, ERROR
 #from ipaddress import IPv4Address, AddressValueError
 from contextlib import suppress
 from csv import reader, writer
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 from urllib.parse import urlparse
 from base64 import b64encode
 from random import choice
@@ -56,6 +56,7 @@ class proxy:
             self.p=''
             
     def addflag(self, flag):
+        '''Should be used to change flags. But I'm sticking my dirty fingers without it atm, will need to settle the API'''
         self.flags+=flag
         
     def __repr__(self):
@@ -74,18 +75,20 @@ class proxypool:
         self.master_plist=OrderedDict()
         if isinstance(arg, str): # File name    
             lg.info('Loading {}'.format(arg))
+            c=Counter()
             with suppress(FileNotFoundError), open(arg) as f:
                 rd=reader(f, delimiter='\t')
                 for row in rd: # (proxy, status)
                     status=row[1] if len(row) > 1 else ''
+                    c.update([status])
                     p=proxy(row[0], status)
                     self.master_plist[p.p]=p                
-            lg.warning('Loaded {} {}'.format(arg,len(self.master_plist)))
+            lg.info('Loaded {} {}'.format(arg, c))
         else: # Iterable of proxies
             for i in arg:
                 p=proxy(i, 'G') # Mark as good
                 self.master_plist[p.p]=p
-            lg.warning('Loaded {} proxies from iterable'.format(len(self.master_plist)))
+            lg.info('Loaded {} proxies from iterable'.format(len(self.master_plist)))
 
     def __init__(self, arg, max_retries=-1, replenish_interval=None,
                  replenish_threads=400, no_disable=False):
@@ -104,7 +107,7 @@ no_disable set to True is good for the providers like crawlera or proxyrack, the
         self.replenish_interval=replenish_interval
         self.replenish_threads=replenish_threads
         self.no_disable=no_disable
-        
+
         if type(arg).__name__ == 'filter': # Ugly! But cannot import filter because of circular dependency
             self.has_filter=True
             self.replenish_at=datetime.now()
@@ -300,6 +303,7 @@ Optionally we can remove disabled proxies from the saved file by setting exclude
         lg.info('Writing new proxies to: '+self.arg)
         with open(self.arg, 'w') as f:
             # Put proven first
+            #set_trace()
             for k, v in sorted(self.master_plist.items(),
                                key=lambda _: 'P' in _[1].flags):
                 # Remove temporary flag (if it was there) and write
@@ -347,6 +351,7 @@ def set_plist_for_filter(pp):
     return old_master_plist
 
 def print_length():
+    '''Increments the counter and outputs at step values'''
     global length, step
     length+=1
     if not length % step: lg.warning(length)
