@@ -115,7 +115,7 @@ no_disable set to True is good for the providers like crawlera or proxyrack, the
             self.master_plist=OrderedDict()
         else: # It's an iterable or a file name
             self.load(arg)
-                
+
         if len(self.master_plist) > 1:
             lg.info( "{} proxies loaded".format(len(self.master_plist)))
 
@@ -129,7 +129,9 @@ no_disable set to True is good for the providers like crawlera or proxyrack, the
 
 If st is None, it will put it into end of the list (to be unlikely picked by the next get_proxy) and remove proven status: we have somehow spoiled this proxy, let it rest.
 
-If st is 'proven', prove the proxy. This proxy was ok to download through, set its flags as proven in master_plist. Move it closer to the head to be picked with priority
+If st is 'P', prove the proxy. This proxy was ok to download through, set its flags as proven in master_plist. Move it closer to the head to be picked with priority.
+
+If st is 'D', disable the proxy.
 
 args vary depending on st. If it's chillout, the arg must be the time to wake up.
         '''
@@ -137,8 +139,9 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
         if len(self.master_plist) <= 1: return
 
         # Possible conversion from str to proxy (scrapy middleware)
+        # TODO: not needed, middleware does it itself
         if not isinstance(p, proxy): p=self.master_plist[p]
-        
+                
         if not st:
             lg.debug('downvoting {}'.format(p))
             # We could have had replenish in between, so it's not there
@@ -229,6 +232,7 @@ Set random to True to get random proxy from the available proxies.
         #lg.error('get_proxy: pp={}, plist={}, master_plist={}'.format(self, self.plist, self.master_plist))
         #lg.error('get_proxy: pp={}, master_plist={}'.format(self, self.master_plist))
         while True:
+            
             try:
                 if random:
                     proxy = choice(tuple(self.plist.keys()))
@@ -245,6 +249,10 @@ Set random to True to get random proxy from the available proxies.
             except (KeyError, AttributeError):
                 if not len(self.master_plist) and not self.has_filter:
                     raise NoProxiesException
+                if not any(
+                        filter(lambda v: 'D' not in v.flags,
+                               self.master_plist.values())):
+                    raise NoProxiesException # All are disabled
                 replenish(self) # Local function
                 continue
             # TODO
