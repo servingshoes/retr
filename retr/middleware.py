@@ -2,6 +2,7 @@
 # Copyright (C) 2017 by Yury Pukhalsky <aikipooh@gmail.com>
 
 from logging import getLogger
+from urllib.parse import urlparse
 from pdb import set_trace
 
 from .proxypool_common import proxypool
@@ -34,10 +35,24 @@ class RandomProxy:
 
     def spider_opened(self, spider):
         spider.pp=self.pp # Export proxylist to the spider
+        
+        self.plist_map={}
+        # Scrapy 1.4 strips username:password, so we need to map proxies with and without to each other. Proxy entry in the master_plist has username/password
+
+        for i in self.pp.master_plist:
+            o=urlparse(i)
+            self.plist_map['{0.scheme}://{0.hostname}:{0.port}'.format(o)]=i
 
     def spider_closed(self, spider):
         self.pp.write()
-    
+
+    def map_proxy(self, p):
+        #set_trace()
+        try: # Can be either stripped or not
+            return self.pp.master_plist[p]
+        except KeyError:
+            return self.pp.master_plist[self.plist_map[p]]
+
     def process_request(self, request, spider):
         def set_auth(request, proxy):
             if proxy.creds:
@@ -47,16 +62,17 @@ class RandomProxy:
 
         pa=request.meta.pop('proxy_action', None)
         if pa == 'disable':
-            self.pp.set_status(request.meta['proxy'], 'disabled')
+            self.pp.set_status(self.map_proxy(request.meta['proxy']),
+                               'disabled')
             del request.meta['proxy'] # Make it pick another proxy
         elif pa == 'release':
-            proxy=self.pp.master_plist[request.meta['proxy']]
+            proxy=self.map_proxy(request.meta['proxy'])
             self.pp.release_proxy(proxy)
             raise IgnoreRequest
             
         # Don't overwrite with a random one (server-side state for IP)
         if 'proxy' in request.meta:
-            proxy=self.pp.master_plist[request.meta['proxy']]
+            proxy=self.map_proxy(request.meta['proxy'])
             set_auth(request, proxy)
             return # No fuss, we have a proxy already
 
@@ -89,8 +105,9 @@ class RandomProxy:
         mode=request.meta.get('proxy_mode', self.mode) # Possible override
         if mode == 'once': # Try once mode, quit here
             return
-        
-        self.pp.set_status(request.meta['proxy'], None) # Simple downvote
+
+        # Simple downvote
+        self.pp.set_status(self.map_proxy(request.meta['proxy']), None)
         del request.meta['proxy'] # Will pick new proxy on next request
 
         # List of conditions when we retry. Some of them may disable the proxy (TBD)
