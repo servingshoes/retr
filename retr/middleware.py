@@ -62,8 +62,7 @@ class RandomProxy:
 
         pa=request.meta.pop('proxy_action', None)
         if pa == 'disable':
-            self.pp.set_status(self.map_proxy(request.meta['proxy']),
-                               'disabled')
+            self.pp.set_status(self.map_proxy(request.meta['proxy']), 'D')
             del request.meta['proxy'] # Make it pick another proxy
         elif pa == 'release':
             proxy=self.map_proxy(request.meta['proxy'])
