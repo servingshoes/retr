@@ -13,6 +13,15 @@ class NoProxiesException(Exception):
 
 lg=getLogger(__name__)
 
+class proxy_stats:
+    '''Stats per domain for the given proxy'''
+    def __init__(self):
+        self.last_access=None # Time of last access through this proxy
+        self.latencies=[] # Array of response times through this proxy
+
+    def __str__(self):
+        return 'last: {}, avg: {}'.format(self.last_access, sum(self.latencies)/len(self.latencies) if self.latencies else 'N/A')
+
 class proxy:
     '''Proxy with state'''
 
@@ -32,7 +41,8 @@ class proxy:
         self.flags=flags
         
         self.creds=None
-
+        self.stats={} # Domain stats for this proxy. Dict by domain
+        
         if p:
             if not (p.startswith('http://') or p.startswith('https://')):
                 p='http://'+p # Don't know how to make it best
@@ -139,7 +149,7 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
         if len(self.master_plist) <= 1: return
 
         # Possible conversion from str to proxy (scrapy middleware)
-        # TODO: not needed, middleware does it itself
+        # TODO: not needed, middleware does it
         if not isinstance(p, proxy): p=self.master_plist[p]
                 
         if not st:
@@ -240,7 +250,7 @@ Set random to True to get random proxy from the available proxies.
                 else:
                     dummy,p=self.plist.popitem(False) # Get from the beginning
                     if 'D' in p.flags:
-                        lg.error('Got disabled proxy')
+                        pass #lg.error('Got disabled proxy')
                     elif 'B' in p.flags:
                         pass # lg.warning('Got bad proxy')
                     else:
@@ -320,7 +330,7 @@ Optionally we can remove disabled proxies from the saved file by setting exclude
                     if exclude_disabled:
                         continue
                     else: # Mark them good again
-                        flags=flags-{'D'}+{'G'}
+                        flags=(flags-{'D'})|{'G'}
                 flags-={'O', 'P'} # Remove technical marks
                 f.write('{}\t{}\n'.format(v.p, ''.join(flags)))
 
