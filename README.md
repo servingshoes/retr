@@ -1,8 +1,8 @@
-I've created this small framework to help myself in scraping. So it basically suits my needs. I've tried to make it as flexible as possible—because the sites I need to scrape are very diverse. Retr stands for RETRieve and RETRy. It does both.
+I've created this small framework to help myself in scraping. So it basically suits my needs. I've tried to make it as flexible as possible—because the sites I need to scrape are very diverse. Retr stands for RETRieve and RETRy. It does both. It's quite fast (I'm learning scrapy now, and cannot make it work as fast). I've used it to scrape billion pages from alibaba on my old decrepit computer. I think it'll be even better with async stuff (not thoroughly tested yet).
 
 # Features
-- multiple threads (legacy version) or async functions.
-- Proxy rotation. It won't stop trying new proxies until the page is retrieved. It rearranges the proxies in the list, putting bad ones in the end.
+- Multiple threads (legacy version) or async functions.
+- Proxy rotation. It won't stop trying new proxies until the page is retrieved. It rearranges the proxies in the list, putting bad ones to the end.
 - Easy filtering to use on raw proxy lists (for example from gatherproxy.com).
 - Scrapy middleware
 
@@ -10,6 +10,11 @@ I've created this small framework to help myself in scraping. So it basically su
 
 ## Validation of pages
 As it keeps retrying the page through different proxies, we need to distinguish between the situation when the proxy returns an error, or the site in question returns a (legitimate) error. To this end, you can add a validation function. Default one checks for the http response code 200, otherwise retries. You can do anything here, for example check for some string you expect in the page (some proxies return admin pages for example).
+
+## Filtering
+Mark all proxies with 'O' flag (so they'll be used one time), and run a farm with that many items. Your spider works normally, optionally using setup_session, and retrieves the item. Then you're responsible to return whether the proxy is good or bad and handle it yourself (update the list in the proxypool for example).
+
+I'm using global variable to choose the mode (normal, getting stuff), or filtering. Maybe I'll change this approach in the future.
 
 ## Scrapy middleware
 The following string should be added to the DOWNLOADER_MIDDLEWARES (pick your own priority):
@@ -19,6 +24,7 @@ The following string should be added to the DOWNLOADER_MIDDLEWARES (pick your ow
 
 ### Settings that influence it:
 - PROXY_LIST
+
   Proxy list containing entries like:
   * http://host1:port
   * http://username:password@host2:port
@@ -41,10 +47,14 @@ PROXY_MODE = 'sequential'
 
 It uses the following meta keys:
 * proxy
+
   Naturally. Preserve it to go through the same proxy (one session), or delete to make a middleware pick new proxy.
 * ss_request
+
   Set this to the Request object used to set up the session. For example you may need to select the location (see a sample), or login and have cookies bound to the chosen proxy address. Then the normal chain of parse functions follows, in the end get original_request key from meta and yield it to continue.
-* original request
+* original_request
+
   The engine stores the current request here and retries it with a new proxy should it be needed after the session setup.
 * proxy_mode
+  
   Overrides global PROXY_MODE setting for the given request.
