@@ -19,7 +19,7 @@ setup(
     author='Yury Pukhalsky',
     author_email='aikipooh@gmail.com',
     name='retr',
-    version='1.2',
+    version='1.3',
     description='Parallelised proxy-switching engine for scraping. Based on requests or aiohttp (alpha). Includes scrapy middleware.',
     long_description=open('README.md').read(),
     url='https://github.com/aikipooh/retr',
