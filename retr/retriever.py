@@ -71,7 +71,8 @@ discard_timeout set to True will discard timed out proxies. Should have some sor
         self.ca_certs=ca_certs
         self.s=None
         self.quit_flag=False # Set to True from outside to make thread quit
-
+        self.f=None # To be filled by the farm, backlink to the farm object
+        
     def __del__(self):        
         if self.p: # Leave this good proxy for someone to use
             self.pp.release_proxy(self.p)

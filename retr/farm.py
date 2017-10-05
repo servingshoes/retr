@@ -28,7 +28,7 @@ lg=getLogger(__name__)
 # from pympler.tracker import SummaryTracker
 # from pympler import asizeof
 
-class farm():
+class farm:
     '''init returns an object, we'll call o.run(i), then del o in the end.'''
     def __init__(self, num_threads, init, it, extendable=False, tn_tmpl=None,
                  reuse=None, handler=None):
@@ -81,6 +81,7 @@ A function in the handler parameter is invoked each second, while the processing
         
         lg.info('Joining threads')
         for i in self.tlist: i.join()
+        lg.info('Finished joining threads')
 
     def __enter__(self):
         return self
@@ -116,7 +117,7 @@ A function in the handler parameter is invoked each second, while the processing
     def handle_item(o, i):
         '''Handles the item with do() function of the class, passing parameters depending on the nature of the argument: can be presented as several arguments to make things easy. do() function must yield one or several results, that will be returned by farm.run()'''
         lg.info( 'Item: {}'.format(i) )
-        if any(isinstance(i, j) for j in (tuple,list,set)): # Present as arguments
+        if isinstance(i, (tuple,list,set)): # Present as arguments
             yield from o.do(*i)
         else:
             yield from o.do(i)
@@ -126,6 +127,7 @@ A function in the handler parameter is invoked each second, while the processing
     def do_extendable(self):
         '''We need to leave threads ready in case the array is extended. Otherwise we can quit right after do() has completed. Also we can use this farm several times, the objects remain live, so we can extend and invoke another run() to gather the results as many times as we want.'''
         o=self.init()
+        if not o.f: o.f=self # Set to the current farm
         with self.cond: self.objects.append(o)
             
         while True:
@@ -187,6 +189,7 @@ A function in the handler parameter is invoked each second, while the processing
                 if len(self.reuse_pool): o=self.reuse_pool.pop()
                 
         if not o: o=self.init()
+        if not o.f: o.f=self # Set to the current farm
         with self.cond: self.objects.append(o)
 
         #lg.warning(len(self.arr))
