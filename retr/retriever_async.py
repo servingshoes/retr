@@ -10,13 +10,15 @@ r=rtv.request('get', 'www.google.com')
 #from time import sleep
 from contextlib import suppress
 from logging import getLogger
-from aiohttp import ClientSession, errors
+from aiohttp import ClientSession, ClientConnectorError, ClientOSError, \
+    ClientHttpProxyError, ServerDisconnectedError, ClientProxyConnectionError
 from async_timeout import timeout
 from asyncio import TimeoutError as aio_TimeoutError, sleep as aio_sleep
-from ssl import CertificateError
+from ssl import SSLError, SSLZeroReturnError # CertificateError, 
 from pdb import set_trace
 
 from .utils import CustomAdapter
+from .proxypool_common import proxy_stats
 
 class ValidateException(Exception):
 # Used in the validate function. Argument:
@@ -106,7 +108,7 @@ bad or something, put it to the end of the list or mark as disabled.
     #     if self.s:
     #         self.s.cookies=cookiejar_from_dict({})
 
-    def validate(self, r):
+    async def validate(self, r):
         '''Sometimes the proxy returns good error code, but the page is wrong, for
 example, requiring authorisation at the proxy, or telling we're over the limit.
 This function validates the page, for example, looking for anchors. Basic
@@ -122,6 +124,15 @@ r here is aiohttp Response object.
     # def update_request(self, req, regular):
     #     '''To be implemented in the descendant class. Call it to update the prepared request used within the request() cycle. For example setup_session may return some token to be used in subsequent calls'''
     #     pass
+
+    def update_stats(self, host, start, end):
+        # Get stats for the given proxy
+        if host not in self.p.stats:
+            self.p.stats[host]=proxy_stats()
+        stats=self.p.stats[host]
+        stats.latencies.append(end-start)
+        stats.last_access=start
+        print(stats)        
     
     async def request(self, what, url, regular=True, **params):
         '''Downloads individual URL, the signature is more or less the same as in client_session.request(). It manages proxies within the proxypool depending on the request outcome.
@@ -134,7 +145,7 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
         with suppress(KeyError): headers.update(params.pop('headers'))
 
         while True:
-            status=0 # Status to set should we change proxy
+            status='' # Status to set should we change proxy
             r = None
 
             err=''
@@ -146,24 +157,27 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 #proxy=self.p.p # if self.p else None
                 if self.p.creds: # Optional proxy auth
                     headers['Proxy-Authorization']=self.p.creds
+
+                pass_params=params.copy()
+                if self.p.p: # We have proxy
+                    pass_params['proxy']=self.p.p
                     
                 with timeout(self.timeout):
-                    r = await self.s.request(what, url, proxy=self.p.p,
-                                             **params)
+                    r = await self.s.request(what, url, **pass_params)
                 #lg.info( 'After request1: {} {}'.format(what, url) )
                 await self.validate(r) # May require getting data
-                self.pp.set_status( self.p, 'proven' ) # Mark proxy as working
+                self.pp.set_status( self.p, 'P' ) # Mark proxy as working
                 #lg.info( 'After request2: {} {}'.format(what, url) )
                 return r
-            except errors.ProxyConnectionError as e:
-                err='ProxyConnectionError: '+e.__str__()
-                status='disabled'
-            except errors.HttpProxyError as e:
-                err='HttpProxyError: '+e.__str__()
-                # TODO: Mark proxy as disabled?
+            except ClientProxyConnectionError as e:
+                err='ClientProxyConnectionError: '+e.__str__()
+                status='D'
+            # except errors.HttpProxyError as e:
+            #     err='HttpProxyError: '+e.__str__()
+            #     # TODO: Mark proxy as disabled?
             except (aio_TimeoutError, TimeoutError):
                 err='timeout'
-                if self.discard_timeout: status='disabled'
+                if self.discard_timeout: status='D'
             except ValidateException as e:
                 tp, *args=e.args
                 err=args[0]
@@ -179,9 +193,10 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                     raise # Unknown exceptions are propagated
             except Exception as e:
                 if type(e) in (
-                        errors.BadStatusLine, CertificateError,
-                        errors.ServerDisconnectedError, errors.ClientOSError,
-                        errors.ClientResponseError
+                        #CertificateError,
+                        ClientConnectorError, ClientOSError,
+                        ClientHttpProxyError, SSLError, SSLZeroReturnError,
+                        ConnectionResetError, ServerDisconnectedError,
                 ):
                     lg.warning('Exception: {} — {}'.format(
                         type(e), e.__str__()))
