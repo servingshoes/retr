@@ -8,4 +8,4 @@ class CustomAdapter(LoggerAdapter):
         # if 'extra' not in kwargs:
         #     kwargs['extra']={}
         # kwargs['extra']['connid']=id(Task.current_task())%(1<<32)
-        return '[{:x}] {}'.format(id(Task.current_task())%(1<<16), msg), kwargs
+        return '[{:04x}] {}'.format(id(Task.current_task())%(1<<16), msg), kwargs
