@@ -12,6 +12,8 @@ from contextlib import suppress
 from logging import getLogger
 from pdb import set_trace
 from ssl import SSLError
+from OpenSSL.SSL import Error as openssl_error
+from os import makedirs, path
 
 from requests import exceptions, Session, Request
 from requests.adapters import HTTPAdapter
@@ -32,13 +34,13 @@ class ProxyException(Exception):
 lg=getLogger(__name__)
 
 class _adapter(HTTPAdapter):
-    def __init__(self, p, headers={}, proxy_headers={}, timeout=30,
+    def __init__(self, p, proxy_headers={}, timeout=30,
                  max_retries=0, ca_certs=False):
         super().__init__(max_retries=max_retries, # This one is the main value
                          pool_connections=10,
                          pool_maxsize=1, pool_block=True)
         self.pm=ProxyManager(p, num_pools=10, timeout=timeout, # retries=2, #max_retries,
-                             headers=headers, proxy_headers=proxy_headers,  
+                             proxy_headers=proxy_headers,  
                              ca_certs=ca_certs)
 
     def proxy_manager_for(self, proxy, **proxy_kwargs):
@@ -48,22 +50,23 @@ class _adapter(HTTPAdapter):
 class retriever:
     '''Retriever with proxy support, in case of a problem with a proxy, it switches to another proxy.'''
     def setup_session(self):
-        '''To be overridden in the descendant classes. This function is called after each change of the proxy, the intention is to prepare the session somehow. May login for example.'''
+        '''To be overridden in the descendant classes. This function is called after each change of the proxy, the intention is to prepare the session somehow. May login for example.
+        Another example would be to setup special headers (use self.headers)
+'''
         pass
 
     # 'Accept-Encoding': 'gzip, deflate, sdch'
-    def __init__(self, pp, headers={}, proxy_headers={},
+    def __init__(self, pp, proxy_headers={},
                  max_retries=0, timeout=60, ca_certs=None,
                  discard_timeout=False):
         '''pp - proxypool to use
-headers - the headers to use in the underlying requests.Session
 max_retries and timeout - the same as in requests.Session.
 
 discard_timeout set to True will discard timed out proxies. Should have some sort of refresh, or we'll run out of proxies
 '''
         self.pp = pp # Proxypool
         self.p = None
-        self.headers=headers # To use when downloading
+        self.headers={} # To use when downloading, can be set in setup_session()
         self.proxy_headers=proxy_headers # To use when downloading
         self.max_retries=max_retries
         self.timeout=timeout
@@ -111,11 +114,38 @@ bad or something, put it to the end of the list or mark as disabled.
         # I cannot make it work unless set the headers here. No idea why.
         if self.p.p: # Only if we have some proxy            
             self.proxy_headers={'Proxy-Authorization': self.p.creds} if self.p.creds else None
-            a=_adapter(self.p.p, self.headers, self.proxy_headers, self.timeout,
-                       self.max_retries, self.ca_certs)
+            # I suspect it may change them withing session
+            #def copy(o): return o #o.copy() if o else o
+            
+            a=_adapter(self.p.p, self.proxy_headers,
+                       self.timeout, self.max_retries, self.ca_certs)
             self.s.mount('http://', a)
             self.s.mount('https://', a)
         if regular: self.setup_session()
+
+    def cached(self, fn, what, binary, *args, **kwargs):
+        '''Expects do_filter and cache members'''
+        try:
+            if self.do_filter: raise FileNotFoundError
+            if self.cache:
+                # Only create intermediate dirs if we use cache
+                with suppress(FileExistsError): makedirs(path.dirname(fn))
+                with open(fn, 'rb' if binary else 'r') as ff: text=ff.read()
+            else:
+                raise FileNotFoundError # Fire artificially to retrieve the page
+            lg.debug('Found {}: {}'.format(what, fn))
+        except:
+            lg.debug('Getting {}'.format(what))
+            r=self.request(*args, **kwargs)
+            text=r.content if binary else r.text 
+            if self.cache:
+                if binary:
+                    open_args={'mode': 'wb'}
+                else:
+                    open_args={'mode': 'w', 'encoding': 'utf8'}
+                with open(fn,  **open_args) as ff: ff.write(text)
+        
+        return text
 
     def clear_cookies(self):
         '''Clear the session cookies'''
@@ -149,13 +179,19 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
         r = None # r will live on this level
         retry=0 # For chunked retries
 
-        headers=self.headers
+        #set_trace()
         allow_redirects=True # Default
-        with suppress(KeyError):
-            headers.update(params.pop('headers'))
+        try: # They'll have priority
+            request_headers=params.pop('headers')
+        except KeyError:
+            request_headers={}
+            
+            
         with suppress(KeyError):
             allow_redirects=params.pop('allow_redirects')
-        req = Request(what, url, headers=headers, **params)
+
+        # NB: headers, if present in the request args, is passed here
+        req = Request(what, url, **params)
 
         while True:
             #print(self.quit_flag)
@@ -168,8 +204,10 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
             self.pick_proxy(regular) # This will eventually call setup_session()
 
             self.update_request(req, regular)
-
+            # In case they were set in setup_session()
             prepped = self.s.prepare_request(req)
+            prepped.headers.update(self.headers)
+            prepped.headers.update(request_headers)
 
             err=""
             try:
@@ -215,22 +253,6 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 else:
                     lg.warning('Unhandled exception in download')
                     raise
-
-                # if 'Connection reset by peer' in err or\
-                #    'Read timed out' in err or\
-                #    'EOF occurred in violation of protocol' in err or\
-                #    'Too many open connections' in err or\
-                #    '[SSL: UNKNOWN_PROTOCOL]' in err or \
-                #    'Temporary failure in name' in err:
-                #     pass
-                # elif 'Caused by ProxyError' in err or\
-                #      'No connections allowed from your IP' in err or\
-                #      'Connection timed out' in err or\
-                #      'Connection aborted' in err:
-                #     status='D'
-                # else:
-                #     lg.warning('Unhandled exception in download')
-                #     raise
             except ValidateException as e:
                 tp, *args=e.args
                 err=args[0]
@@ -248,16 +270,13 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 else:
                     raise # Unknown exceptions are propagated
             except Exception as e:
-                print(type(e))
-                if type(e) in (
+                lg.warning('Exception: {} — {}'.format(type(e), e.__str__()))
+                if not isinstance(e, (
                         OSError, # Network unreachable for example
                         LocationParseError, # What the hell is this?
                         ConnectionResetError, exceptions.SSLError, SSLError,
-                        exceptions.ContentDecodingError
-                ):
-                    lg.warning('Exception: {} — {}'.format(
-                        type(e), e.__str__()))
-                else:
+                        openssl_error, exceptions.ContentDecodingError
+                )):
                     raise # Unknown (yet) exception
                 err=type(e)
 
