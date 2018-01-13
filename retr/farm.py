@@ -20,7 +20,7 @@ from logging import getLogger
 from queue import Queue, Empty # Exception
 from types import GeneratorType
 from itertools import repeat, chain
-
+from contextlib import suppress
 from time import sleep
 
 lg=getLogger(__name__)
@@ -127,7 +127,8 @@ A function in the handler parameter is invoked each second, while the processing
     def do_extendable(self):
         '''We need to leave threads ready in case the array is extended. Otherwise we can quit right after do() has completed. Also we can use this farm several times, the objects remain live, so we can extend and invoke another run() to gather the results as many times as we want.'''
         o=self.init()
-        if not o.f: o.f=self # Set to the current farm
+        with suppress(AttributeError):
+            if not o.f: o.f=self # Set to the current farm
         with self.cond: self.objects.append(o)
             
         while True:
@@ -189,7 +190,8 @@ A function in the handler parameter is invoked each second, while the processing
                 if len(self.reuse_pool): o=self.reuse_pool.pop()
                 
         if not o: o=self.init()
-        if not o.f: o.f=self # Set to the current farm
+        with suppress(AttributeError):
+            if not o.f: o.f=self # Set to the current farm
         with self.cond: self.objects.append(o)
 
         #lg.warning(len(self.arr))
@@ -215,9 +217,22 @@ A function in the handler parameter is invoked each second, while the processing
         lg.info("has finished")
 
         #tracker.print_diff()
-                
+
+    def cancel(self, cnt=0):
+        '''Cancels all the threads in the farm'''
+        # Put poison pills and then signal the threads to stop
+        if not cnt: cnt=self.num_threads # That many threads are running
+
+        with self.cond:
+            if self.extendable:
+                self.arr+=[None]*cnt
+            else:
+                self.arr=chain(repeat(None,cnt), self.arr)
+            self.cond.notify( cnt )
+            for _ in self.objects: _.quit_flag=True
+        
     def run(self):
-        '''Main function to invoke. When KeyboardInterrupt is received, it sets the quit_flag in all the objects present, retrievers then return (res_nok, abort). It's the problem of the do() function to handle it and possibly extend the main list with the item that wasn't handled to show it in the end (for possible restart)
+        '''Main function to invoke. When KeyboardInterrupt is received, it sets the quit_flag in all the objects present, retrievers then raise an exception. It's the problem of the do() function to handle it and possibly extend the main list with the item that wasn't handled to show it in the end (for possible restart)
 self.handler() function is invoked each second if there are no items in the queue to allow for some rudimental auxiliary activity'''
         # Now start the threads, only once
         if self.tlist:
@@ -241,15 +256,7 @@ self.handler() function is invoked each second if there are no items in the queu
                 continue # Go back to suck the queue
             except KeyboardInterrupt:
                 lg.warning( 'Trying to kill nicely, putting {} None'.format(cnt) )
-                # Put poison pills and then signal the threads to stop
-                with self.cond:
-                    if self.extendable:
-                        self.arr+=[None]*cnt
-                    else:
-                        self.arr=chain(repeat(None,cnt), self.arr)
-                    self.cond.notify( cnt )
-                    for _ in self.objects: _.quit_flag=True
-
+                self.cancel(cnt)
                 res=None
                 
             #lg.warning('run: {}'.format(res))
