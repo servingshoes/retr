@@ -5,16 +5,15 @@
 See real world examples in the samples/.
 '''
 
-from asyncio import ensure_future, wait, Queue, Task, Semaphore, \
+from asyncio import ensure_future, get_event_loop, wait, Queue, Task, Semaphore,\
     CancelledError, InvalidStateError
 from os import _exit
 from contextlib import suppress
 from logging import getLogger
-
 from pdb import set_trace
 
 from .utils import CustomAdapter
-from .retriever_async import ProxyException
+from . import ProxyException
 # from pympler.tracker import SummaryTracker
 # from pympler import asizeof
 
@@ -25,12 +24,11 @@ class farm:
     '''init() returns an object o, we'll call o.run(i), then del o in the end.
 '''
 
-    def __init__(self, it, init, num_tasks=100, loop=None, done_task=None):
+    def __init__(self, it, init, num_tasks=100, loop=None):
         '''Initialise the data and start initial futures'''
         self.num_objects=num_tasks # How many objects we can create
         
-        self.loop=loop
-        if done_task: self.done_task=done_task
+        self.loop=loop or get_event_loop()
             
         self.init=init
         self.objects=Queue(num_tasks, loop=loop) # Birth control device
@@ -42,13 +40,15 @@ class farm:
         self.extender_task=ensure_future(self.extender())
         self.args[self.extender_task]='extender'
 
-    def __del__(self):
-        # TODO: Should delete objects
-        # while True:
-        #     o=await self.objects.get()
-        #     del o
-        return
-
+    async def _close(self):
+        #set_trace()
+        while not self.objects.empty():
+            o=await self.objects.get()
+            del o
+        
+    def close(self):
+        #task=ensure_future(self._close(self.loop))
+        res=self.loop.run_until_complete(self._close()) # task
     # def __enter__(self):
     #     return self
     
@@ -78,6 +78,7 @@ class farm:
     async def extender(self):
         '''Enqueues another bunch of items, returns the number enqueued'''
 
+        #set_trace()
         # Putting initial requests array
         await self.extend(self.initial_toget)
 
@@ -108,7 +109,11 @@ class farm:
 
             lg.debug('Extender after objects.get()')
             task=ensure_future(self.do(o, i))
-            task.add_done_callback(self.done_task)
+            try: # Add respective done_task from the class or farm default
+                dt=o.done_task
+            except AttributeError:
+                dt=self.done_task
+            task.add_done_callback(dt)
             self.args[task]=i
             #lg.debug('added task {} {}'.format(id(task), i))
         
@@ -119,6 +124,9 @@ class farm:
     async def do(self, o, i):
         '''We have a pool of retriever objects. First we get one (or wait until it's ready), then invoke o.do(). We can use this farm several times — just by extending it (the objects remain live) — to gather the results as many times as we want.
 '''
+        with suppress(AttributeError):
+            if not o.f: o.f=self # Set to the current farm
+
         lg.info('Item: {}'.format(i))
 
         interrupted=False

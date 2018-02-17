@@ -7,13 +7,14 @@ rtv=retriever(pp)
 r=rtv.request('get', 'www.google.com')
 '''
 
-from time import sleep
+from time import sleep, time
 from contextlib import suppress
 from logging import getLogger
 from pdb import set_trace
 from ssl import SSLError
 from OpenSSL.SSL import Error as openssl_error
 from os import makedirs, path
+import urllib3.exceptions as u3_exceptions
 
 from requests import exceptions, Session, Request
 from requests.adapters import HTTPAdapter
@@ -21,15 +22,7 @@ from requests.utils import cookiejar_from_dict
 from requests.packages.urllib3.poolmanager import ProxyManager
 from requests.packages.urllib3.exceptions import LocationParseError
 
-class ValidateException(Exception):
-# Used in the validate function. Argument:
-# ('retry', reason) # Retry with different proxy
-# ('continue', warning, sleep_in_seconds) # Retry with the same proxy. Temporary condition
-    pass
-
-class ProxyException(Exception):
-# Used in the filter proxy engine. Argument: proxy
-    pass
+from . import ValidateException
 
 lg=getLogger(__name__)
 
@@ -81,7 +74,7 @@ discard_timeout set to True will discard timed out proxies. Should have some sor
             self.pp.release_proxy(self.p)
         del self.s
         
-    def change_proxy(self, err, status=None):
+    def change_proxy(self, err, status=None, *args):
         '''Change proxy, optionally changing its status. The reason might have been that it was
 bad or something, put it to the end of the list or mark as disabled.
 
@@ -89,8 +82,9 @@ bad or something, put it to the end of the list or mark as disabled.
         # We could use change_proxy in validate: self.p is None
         if not self.p: return
 
-        lg.debug("Changing proxy ({}): {}".format(self.p, err))
-        self.pp.set_status(self.p, status)
+        lg.debug("Changing proxy {} {}→{}: {}".format(
+            self.p, self.p.flags, status, err))
+        self.pp.set_status(self.p, status, *args)
         self.p=None # Will pick new proxy on next download
 
     def pick_proxy(self, regular=False):
@@ -113,10 +107,7 @@ bad or something, put it to the end of the list or mark as disabled.
         self.s = Session()
         # I cannot make it work unless set the headers here. No idea why.
         if self.p.p: # Only if we have some proxy            
-            self.proxy_headers={'Proxy-Authorization': self.p.creds} if self.p.creds else None
-            # I suspect it may change them withing session
-            #def copy(o): return o #o.copy() if o else o
-            
+            self.proxy_headers={'Proxy-Authorization': self.p.creds} if self.p.creds else None            
             a=_adapter(self.p.p, self.proxy_headers,
                        self.timeout, self.max_retries, self.ca_certs)
             self.s.mount('http://', a)
@@ -129,11 +120,12 @@ bad or something, put it to the end of the list or mark as disabled.
             if self.do_filter: raise FileNotFoundError
             if self.cache:
                 # Only create intermediate dirs if we use cache
-                with suppress(FileExistsError): makedirs(path.dirname(fn))
+                makedirs(path.dirname(fn), exist_ok=True)
                 with open(fn, 'rb' if binary else 'r') as ff: text=ff.read()
             else:
                 raise FileNotFoundError # Fire artificially to retrieve the page
             lg.debug('Found {}: {}'.format(what, fn))
+            cached=True
         except:
             lg.debug('Getting {}'.format(what))
             r=self.request(*args, **kwargs)
@@ -144,12 +136,13 @@ bad or something, put it to the end of the list or mark as disabled.
                 else:
                     open_args={'mode': 'w', 'encoding': 'utf8'}
                 with open(fn,  **open_args) as ff: ff.write(text)
+            cached=False
         
-        return text
+        return text, cached
 
     def clear_cookies(self):
         '''Clear the session cookies'''
-        lg.warning( 'Clearing cookies' )
+        lg.info( 'Clearing cookies' )
         if self.s:
             self.s.cookies=cookiejar_from_dict({})
 
@@ -180,13 +173,9 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
         retry=0 # For chunked retries
 
         #set_trace()
+        request_headers=params.pop('headers', {})            
+
         allow_redirects=True # Default
-        try: # They'll have priority
-            request_headers=params.pop('headers')
-        except KeyError:
-            request_headers={}
-            
-            
         with suppress(KeyError):
             allow_redirects=params.pop('allow_redirects')
 
@@ -199,7 +188,8 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 raise KeyboardInterrupt
             
             status=None # Status to set should we change proxy
-
+            args=[] # Additional args for the proxy
+            
             #lg.info('New run')
             self.pick_proxy(regular) # This will eventually call setup_session()
 
@@ -211,12 +201,13 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
 
             err=""
             try:
-                proxies={ 'https': self.p.p, 'http': self.p.p } if self.p else {}
+                proxies={'https': self.p.p, 'http': self.p.p} if self.p else {}
                 #lg.debug( 'Before request: {} {}'.format(what, url) )
 
                 # params['headers']['User-Agent']=self.ua.ff
                 # sleep(10)
 
+                time_start=time()
                 r = self.s.send(prepped, proxies=proxies,
                                 verify=self.ca_certs, timeout=self.timeout,
                                 allow_redirects=allow_redirects)
@@ -224,6 +215,7 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 #print(r.text)
                 self.validate(url, r)
                 self.pp.set_status( self.p, 'P' ) # Mark proxy as working
+                self.p.time=time()-time_start
                 return r
             except exceptions.ChunkedEncodingError:
                 err="chunked" # Fail otherwise
@@ -241,10 +233,21 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 status='D'
             except exceptions.ConnectionError as e:
                 err=e.__str__()
-                #print(type(e), len(e.args[0].args), err)
-                if type(e) in (
+                e1=e.args[0]
+                if isinstance(e1, u3_exceptions.MaxRetryError):
+                    e2=e1.reason
+                    #set_trace()
+                    err=e2.__str__()
+                    if isinstance(e2, u3_exceptions.ProxyError): # (str, exc)
+                        reason, exc=e2.args
+                        if isinstance(exc, u3_exceptions.NewConnectionError):
+                            err=exc.args[0] # Timeout or pool error
+                        else:
+                            status='D' # Bad proxy                    
+                elif isinstance(e, (
                         exceptions.ProxyError,
-                ):
+                )):
+                    #set_trace()
                     status='D' # Bad proxy
                 elif type(e) in (
                         exceptions.SSLError, exceptions.ConnectionError
@@ -254,12 +257,13 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                     lg.warning('Unhandled exception in download')
                     raise
             except ValidateException as e:
+                #set_trace()
                 tp, *args=e.args
                 err=args[0]
                 if tp == 'continue': # args=(msg,time_to_sleep)
                     lg.warning(args[0])
-                    sleep(args[1])
-                    continue
+                    status='C'
+                    args=[time()+args[1]]
                 # elif res == res_nok:
                 # return res, err, r
                 elif tp == 'retry':
@@ -300,4 +304,4 @@ Setting regular to False is used in setup_session (to evade calling setup_sessio
                 #set_trace()
                 raise ProxyException(self.p.p)
 
-            self.change_proxy(err, status)
+            self.change_proxy(err, status, *args)

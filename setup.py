@@ -19,8 +19,8 @@ setup(
     author='Yury Pukhalsky',
     author_email='aikipooh@gmail.com',
     name='retr',
-    version='1.3',
-    description='Parallelised proxy-switching engine for scraping. Based on requests or aiohttp (alpha). Includes scrapy middleware.',
+    version='1.5',
+    description='Parallelised proxy-switching engine for scraping. Based on requests or aiohttp (beta). Includes scrapy middleware.',
     long_description=open('README.md').read(),
     url='https://github.com/aikipooh/retr',
     # license='BSD License',
@@ -31,6 +31,7 @@ setup(
     #zip_safe=False,
     install_requires=[
         'requests>=2.0', # For the legacy (threaded) version
-        'aiohttp>=2.0.6' # For the new version
+        'aiohttp>=2.0.6', # For the new version
+        'retrying'
     ]
 )

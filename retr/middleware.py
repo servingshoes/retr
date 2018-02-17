@@ -7,8 +7,8 @@ from pdb import set_trace
 
 from .proxypool_common import proxypool
 
-from twisted.internet.error import ConnectionRefusedError, TCPTimedOutError, ConnectError, \
-    TimeoutError, NoRouteError
+from twisted.internet.error import ConnectionRefusedError, TCPTimedOutError, \
+    ConnectError, TimeoutError, NoRouteError
 from twisted.web._newclient import ResponseNeverReceived, ResponseFailed
 
 from scrapy.core.downloader.handlers.http11 import TunnelError
@@ -20,9 +20,9 @@ lg = getLogger('scrapy.proxypool')
 class RandomProxy:
     def __init__(self, settings):
         self.mode = settings.get('PROXY_MODE')
+        self.proxy_flags = settings.get('PROXY_FLAGS', '')
         self.proxy_list = settings.get('PROXY_LIST')
-        if not self.proxy_list:
-            raise KeyError('PROXY_LIST setting is missing')
+        if not self.proxy_list: raise KeyError('PROXY_LIST setting is missing')
 
         self.pp=proxypool(self.proxy_list)
 
@@ -42,6 +42,11 @@ class RandomProxy:
         for i in self.pp.master_plist:
             o=urlparse(i)
             self.plist_map['{0.scheme}://{0.hostname}:{0.port}'.format(o)]=i
+            
+        lg.debug('proxy middleware: {} mode, flags: {}, proxies: {}'.format(
+            self.mode, self.proxy_flags,
+            self.proxy_list if isinstance(self.proxy_list, str) \
+            else len(self.proxy_list)))
 
     def spider_closed(self, spider):
         self.pp.write()
@@ -102,18 +107,23 @@ class RandomProxy:
         if isinstance(exception, IgnoreRequest): return # No problem
         
         mode=request.meta.get('proxy_mode', self.mode) # Possible override
-        if mode == 'once': # Try once mode, quit here
-            return
-
-        # Simple downvote
+        if mode == 'once': return # Try once mode, quit here
+            
+        # Simple downvote first
         self.pp.set_status(self.map_proxy(request.meta['proxy']), None)
+
+        # List of conditions when we retry. Some of them may disable the proxy
+        if isinstance(exception, (
+                ConnectionRefusedError, ConnectError, NoRouteError,
+                ResponseFailed, TunnelError)):
+            self.pp.set_status(self.map_proxy(request.meta['proxy']), 'D')
+        elif isinstance(exception, (
+                TimeoutError, TCPTimedOutError, ResponseFailed)):
+            if 'T' in self.proxy_flags: # Disable on timeout
+                self.pp.set_status(self.map_proxy(request.meta['proxy']), 'D')
+        else: raise
+
+        lg.warning('{} on %s'.format(type(exception)), request.url)
         del request.meta['proxy'] # Will pick new proxy on next request
 
-        # List of conditions when we retry. Some of them may disable the proxy (TBD)
-        if type(exception) in (
-                ConnectionRefusedError, ConnectError, TimeoutError,
-                TCPTimedOutError, NoRouteError, ResponseNeverReceived,
-                ResponseFailed, TunnelError ):
-            lg.error('{} on %s'.format(type(exception)), request.url)
-
-            return request.replace(dont_filter = True)
+        return request.replace(dont_filter = True)

@@ -5,16 +5,20 @@ I've created this small framework to help myself in scraping. So it basically su
 - Proxy rotation. It won't stop trying new proxies until the page is retrieved. It rearranges the proxies in the list, putting bad ones to the end.
 - Easy filtering to use on raw proxy lists (for example from gatherproxy.com).
 - Scrapy middleware
+- KeyboardInterrupt friendly. It tries to shut down gracefully, returning unprocessed input items back into toget.lst. NB: Haven't used it for a while, so it's not working likely. I'm using caching for smaller projects, so I don't care much about restarting.
 
 # Usage
 
 ## Validation of pages
-As it keeps retrying the page through different proxies, we need to distinguish between the situation when the proxy returns an error, or the site in question returns a (legitimate) error. To this end, you can add a validation function. Default one checks for the http response code 200, otherwise retries. You can do anything here, for example check for some string you expect in the page (some proxies return admin pages for example).
+As it keeps retrying the page through different proxies, we need to distinguish between the situation when the proxy returns an error, or the site in question returns a (legitimate) error. To this end, you can add a validation function. Default one checks for the http response code 200, otherwise retries. You can do anything here, for instance check for some string you expect in the page (some proxies return admin pages for example).
+
+## Async version
+Basically the same, have a look at the sample. Right now it's possible to specify callback to be called after do() has finished: done_task().
 
 ## Filtering
-Mark all proxies with 'O' flag (so they'll be used one time), and run a farm with that many items. Your spider works normally, optionally using setup_session, and retrieves the item. Then you're responsible to return whether the proxy is good or bad and handle it yourself (update the list in the proxypool for example).
+Mark all proxies with 'O' flag (so they'll be used one time), and run a farm with that many items. Your spider works normally, optionally using setup_session(), calling validate() and retrieves the item. Then you're responsible to return whether the proxy is good or bad and handle it yourself (update the list in the proxypool for example). See samples.
 
-I'm using global variable to choose the mode (normal, getting stuff), or filtering. Maybe I'll change this approach in the future.
+Most of the behaviour changing variables (cache, filter mode) are now members of the descendant class.
 
 ## Scrapy middleware
 The following string should be added to the DOWNLOADER_MIDDLEWARES (pick your own priority):

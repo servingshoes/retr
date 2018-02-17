@@ -6,6 +6,7 @@ from collections import OrderedDict, Counter
 from urllib.parse import urlparse
 from base64 import b64encode
 from random import choice
+from time import time
 from pdb import set_trace
 
 class NoProxiesException(Exception):
@@ -42,6 +43,7 @@ class proxy:
         
         self.creds=None
         self.stats={} # Domain stats for this proxy. Dict by domain
+        self.time=0
         
         if p:
             if not (p.startswith('http://') or p.startswith('https://')):
@@ -65,9 +67,9 @@ class proxy:
             # want to use it)
             self.p=''
             
-    def addflag(self, flag):
-        '''Should be used to change flags. But I'm sticking my dirty fingers without it atm, will need to settle the API'''
-        self.flags+=flag
+    def change_flags(self, add, remove):
+        '''Add some flags, remove some flags'''
+        self.flags=''.join(sorted((set(self.flags)|set(add))-set(remove)))
         
     def __repr__(self):
         return '{0.p} ({0.flags} {0.tries})'.format(self)
@@ -78,6 +80,10 @@ class proxypool:
     def update_replenish(self):
         self.replenish_at=datetime.now()+timedelta(seconds=self.replenish_interval)
 
+    def stats(self):
+        #set_trace()
+        return Counter(_.flags for _ in self.master_plist.values())
+
     def load(self, arg):
         '''Always load all proxies, we'll be able to prune and rearrange later
     '''
@@ -85,15 +91,12 @@ class proxypool:
         self.master_plist=OrderedDict()
         if isinstance(arg, str): # File name    
             lg.info('Loading {}'.format(arg))
-            c=Counter()
             with suppress(FileNotFoundError), open(arg) as f:
                 rd=reader(f, delimiter='\t')
-                for row in rd: # (proxy, status)
-                    status=row[1] if len(row) > 1 else ''
-                    c.update([status])
-                    p=proxy(row[0], status)
+                for row in rd: # (proxy, status, time)
+                    p=proxy(row[0], row[1] if len(row) > 1 else '')
                     self.master_plist[p.p]=p                
-            lg.info('Loaded {} {}'.format(arg, c))
+            lg.info('Loaded {} {}'.format(arg, self.stats()))
         else: # Iterable of proxies
             for i in arg:
                 p=proxy(i, 'G') # Mark as good
@@ -129,6 +132,8 @@ no_disable set to True is good for the providers like crawlera or proxyrack, the
         if len(self.master_plist) > 1:
             lg.info( "{} proxies loaded".format(len(self.master_plist)))
 
+        self.old_master_plist=None
+
     def active_number(self):
         '''Gets active (ie not disabled) proxies count'''
         return len(tuple(k for k,v in self.master_plist.items()
@@ -156,24 +161,26 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
             lg.debug('downvoting {}'.format(p))
             # We could have had replenish in between, so it's not there
             with suppress(KeyError): self.master_plist.move_to_end(p)
-            p.flags=p.flags.replace('P','') # Remove proven flag
+            p.change_flags('', 'P') # Remove proven flag
             p.tries+=1
             #set_trace()
-            if self.max_retries != -1 and p.tries >= self.max_retries: st='D'
+            if self.max_retries != -1 and p.tries >= self.max_retries:
+                set_trace()
+                st='D'
         elif st == 'P':
             p.tries=0 # Reset the tries counter
             if 'P' in p.flags: return # Already proven, no fuss
             
             self.master_plist[p.p]=p # It works in any case, don't lose it
             self.master_plist.move_to_end(p.p, False) # Move to the beginning
-            p.flags=p.flags.replace('D','')+'P' # Remove disabled flag
+            p.change_flags('P','D') # Proxy's in line again!
         elif st == 'C':
             p.wake_time=args[0]
-            p.flags+='C'
+            p.change_flags('C', '')
 
         if st == 'D':
             # TODO: maybe put it to rest?
-            if not self.no_disable: p.flags='D'
+            if not self.no_disable: p.change_flags('D', '')
             
         #lg.debug('master_plist: {}'.format(self.master_plist))
                 
@@ -185,7 +192,9 @@ args vary depending on st. If it's chillout, the arg must be the time to wake up
         try:
             lg.debug('releasing {}'.format(p))
         except:
-            pass # Strange error, happens on shutdown. Maybe lg is done with already?
+            # Strange error, happens on shutdown. Maybe lg is done with already?
+            lg.exception('release_proxy')
+            
         if self.plist:
             self.plist[p.p]=p
             self.plist.move_to_end(p.p, False) # Move to the beginning
@@ -198,7 +207,7 @@ Set random to True to get random proxy from the available proxies.
             '''Replenish plist from master_plist. Several cases here'''
 
             #set_trace()
-            active_num=self.active_number()
+            #active_num=self.active_number()
             #if not active_num and self.flt:
             if False: #  self.has_filter: # Doesn't work for now
                 # First check if we have something in the disabled pool, we'll put them back into the main pool (master_plist) and see if they have repented. Up to max_retries times, otherwise they burn in hell.                
@@ -234,8 +243,7 @@ Set random to True to get random proxy from the available proxies.
 
             self.plist=self.master_plist.copy()
             if len(self.master_plist) > 1: # Don't spam with trivial cases
-                lg.info('Replenished from master_plist ({}/{}).'.format(
-                    active_num, len(self.plist)))
+                lg.info('Replenished from master_plist {}.'.format(self.stats()))
             
         p=None
         #lg.debug( 'self.plist: {}'.format(len(self.plist) or 'Empty'))
@@ -253,6 +261,13 @@ Set random to True to get random proxy from the available proxies.
                         pass #lg.error('Got disabled proxy')
                     elif 'B' in p.flags:
                         pass # lg.warning('Got bad proxy')
+                    elif 'C' in p.flags:
+                        if p.wake_time and time() >= p.wake_time:
+                            p.wake_time=None
+                            p.change_flags('', 'C')
+                            break
+                        else:
+                            lg.debug('The proxy is sleeping')
                     else:
                         break
                     continue
@@ -304,16 +319,16 @@ Set random to True to get random proxy from the available proxies.
 
         #http://gatherproxy.com/proxylist/downloadproxylist/?sid=4579995
         sid=h.split('=')[-1]
-        r=s.post(prefix+h, data={ 'ID': sid, 'C': '', 'P': '', 'T': '', 'U': '0'})
+        r=s.post(prefix+h, data={'ID': sid, 'C': '', 'P': '', 'T': '', 'U': '0'})
         
         return r.text.splitlines()
             
-    def write(self, exclude_disabled=False):
+    def write(self, preserve_flags='DG'):
         '''Write master proxy list to a file. New file will be created with the same
 order as in master list, good proxies first, bad last. So it's advised to run it
 before the program exit, for proxies to be sorted in better order.
 
-Optionally we can remove disabled proxies from the saved file by setting exclude_disabled to True. Otherwise disabled will be written as good again.
+We can set the flags to preserve with preserve_flags parameter.
 
         '''
         if not self.arg or type(self.arg) is not str: return
@@ -322,54 +337,55 @@ Optionally we can remove disabled proxies from the saved file by setting exclude
         with open(self.arg, 'w') as f:
             # Put proven first
             #set_trace()
+            pf=set(preserve_flags)
             for k, v in sorted(self.master_plist.items(),
                                key=lambda _: 'P' in _[1].flags):
-                # Remove temporary flag (if it was there) and write
-                flags=set(v.flags)
-                if 'D' in flags:
-                    if exclude_disabled:
-                        continue
-                    else: # Mark them good again
-                        flags=(flags-{'D'})|{'G'}
-                flags-={'O', 'P'} # Remove technical marks
-                f.write('{}\t{}\n'.format(v.p, ''.join(flags)))
+                # Filter the flags
+                f.write('{}\t{}\t{}\n'.format(
+                    v.p, ''.join(sorted(set(v.flags)&pf)), v.time))
 
-# Several useful functions for filtering
-def set_plist_for_filter(pp):
-    global length, step
-    # proxies file will be rewritten with marks ('B' and 'G'). If you need to
-    # test new proxies, add them in the beginning, they'll be normalised and
-    # OrderedDict will take care about retaining the marks.
+    # Several useful functions for filtering
+    def set_plist_for_filter(self, verbatim=False):
+        '''verbatim - just pass all the proxies, without dividing by bad or good'''
 
-    # You may make it work with bad proxies, marking them with O and running the
-    # filter process. It may find new good proxies in there, because depending
-    # on time of day different proxies may work, that's why it may be useful to
-    # run the filter several times.
+        # proxies file will be rewritten with marks ('B', 'G' etc). If you need
+        # to test new proxies, add them in the beginning, they'll be normalised
+        # and OrderedDict will take care about retaining the marks.
 
-    new_plist=OrderedDict({k:v for k,v in pp.master_plist.items()
-                           if v.flags == ''})
-    if not new_plist: # There are no proxies with unknown status
-        # Let's recheck all bad ones, leaving good ones as they are
-        new_plist=OrderedDict({k:v for k,v in pp.master_plist.items()
-                               if v.flags != 'G'})
-    old_master_plist, pp.master_plist=pp.master_plist, new_plist        
+        # You may make it work with bad proxies, marking them with O and running
+        # the filter process. It may find new good proxies in there, because
+        # depending on time of day different proxies may work, that's why it may
+        # be useful to run the filter several times.
 
-    for v in pp.master_plist.values():
-        v.addflag('O') # Set one time flag on them all
-        v.flags=v.flags.replace('B', '') # Remove bad flag
+        if verbatim:
+            new_plist=self.master_plist.copy()
+        else:
+            new_plist=OrderedDict({k:v for k,v in self.master_plist.items()
+                                   if v.flags == ''})
+            if not new_plist: # There are no proxies with unknown status
+                # Let's recheck all bad ones, leaving good ones as they are
+                new_plist=OrderedDict({k:v for k,v in self.master_plist.items()
+                                       if v.flags != 'G'})
 
-    length=0
-    if len(pp.master_plist) > 5000:
-        step=1000
-    elif len(pp.master_plist) > 500:
-        step=100
-    else:
-        step=10
 
-    return old_master_plist
+        self.old_master_plist, self.master_plist=self.master_plist, new_plist
 
-def print_length():
-    '''Increments the counter and outputs at step values'''
-    global length, step
-    length+=1
-    if not length % step: lg.warning(length)
+        for v in self.master_plist.values(): v.change_flags('O', 'BG')
+
+        self.length=0
+        if len(self.master_plist) > 5000:
+            self.step=1000
+        elif len(self.master_plist) > 500:
+            self.step=100
+        else:
+            self.step=10
+
+    def update_master(self):
+        self.old_master_plist.update(self.master_plist) # Maybe flags have changed?
+        self.master_plist=self.old_master_plist
+
+    def print_length(self):
+        '''Increments the counter and outputs at step values'''
+        self.length+=1
+        if not self.length % self.step:
+            lg.warning('FILTERED: {}'.format(self.length))

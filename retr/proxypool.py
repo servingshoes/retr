@@ -15,10 +15,12 @@ class proxypool(pp_common):
         super().__init__(*args, **kwargs)
         
     def set_status(self, *args, **kwargs):
-        with self.lock: super().set_status(*args, **kwargs)
+        with self.lock:
+            super().set_status(*args, **kwargs)
                 
     def release_proxy(self, *args):
-        with self.lock: super().release_proxy(*args)
+        with self.lock:
+            super().release_proxy(*args)
 
     # def active_number(self):
     #     with self.lock: super().active_number()
